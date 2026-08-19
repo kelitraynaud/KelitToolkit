@@ -72,6 +72,7 @@ from ..operators.unified_export import (
     UNREAL_OT_export_assets,
 )
 from ..operators.unreal_link import (
+    UNREAL_OT_connection_doctor,
     UNREAL_OT_test_connection,
     UNREAL_OT_fix_interchange_permanent,
 )
@@ -252,6 +253,8 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
         col = box.column(align=True)
         col.operator(UNREAL_OT_test_connection.bl_idname,
                      text="Test Unreal Connection", icon='CHECKMARK')
+        col.operator(UNREAL_OT_connection_doctor.bl_idname,
+                     text="Connection Doctor (Setup Help)", icon='COMMUNITY')
         col.operator(UNREAL_OT_usd_clear_synced.bl_idname,
                      text="Clear All Synced Actors", icon='TRASH')
 

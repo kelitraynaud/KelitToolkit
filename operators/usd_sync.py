@@ -31,7 +31,7 @@ from .unified_export import (
     is_descendant_of,
     isolated_selection,
     action_frame_range,
-    at_world_origin,
+    at_neutral_root,
     asset_filename,
 )
 
@@ -51,6 +51,32 @@ def convert_blender_rotation_to_unreal_rotation(rotation):
     y = math.degrees(rotation[1])
     z = math.degrees(rotation[2])
     return [-y, -z, x]
+
+
+def decompose_signed(matrix, euler_reference=None):
+    """
+    (translation, euler XYZ, scale) with mirrored matrices handled: plain
+    to_scale()/to_euler() silently drop a negative determinant, so mirrored
+    objects (common in imports) arrived un-mirrored in Unreal. A negative
+    determinant flips the X scale, keeping the rotation part pure so that
+    T @ R @ S recomposes the input matrix.
+    """
+    import mathutils
+    m3 = matrix.to_3x3()
+    # column lengths = unsigned scale magnitudes (to_scale() distributes
+    # signs its own way on mirrored matrices, so it cannot be trusted here)
+    scale = mathutils.Vector((m3.col[0].length, m3.col[1].length,
+                              m3.col[2].length))
+    if m3.determinant() < 0:
+        scale.x = -scale.x
+    safe = [value if abs(value) > 1e-9 else 1e-9 for value in scale]
+    rotation_m3 = m3 @ mathutils.Matrix.Diagonal(
+        (1.0 / safe[0], 1.0 / safe[1], 1.0 / safe[2]))
+    if euler_reference is not None:
+        euler = rotation_m3.to_euler('XYZ', euler_reference)
+    else:
+        euler = rotation_m3.to_euler('XYZ')
+    return matrix.to_translation(), euler, scale
 
 
 def sanitize_prim_name(name):
@@ -593,10 +619,9 @@ def bake_world_animation(context, objects, frame_start, frame_end,
     world_consts = {}
     previous_euler = {}
 
-    def as_row(matrix, euler):
-        location = convert_blender_to_unreal_location(matrix.to_translation())
+    def as_row(translation, euler, scale):
+        location = convert_blender_to_unreal_location(translation)
         pitch, yaw, roll = convert_blender_rotation_to_unreal_rotation(euler)
-        scale = matrix.to_scale()
         return [location[0], location[1], location[2],
                 roll, pitch, yaw,
                 scale[0], scale[1], scale[2]]
@@ -611,8 +636,9 @@ def bake_world_animation(context, objects, frame_start, frame_end,
                 if first_frame:
                     # actors spawn at their frame-start WORLD transform even
                     # when the track itself is baked in parent space
+                    w_loc, w_euler, w_scale = decompose_signed(world)
                     world_consts[obj.name] = [round(v, 5)
-                                              for v in as_row(world, world.to_euler('XYZ'))]
+                                              for v in as_row(w_loc, w_euler, w_scale)]
                 matrix = world
                 if (relative_to_parent and obj.parent is not None
                         and obj.parent.name in staged_names):
@@ -620,10 +646,12 @@ def bake_world_animation(context, objects, frame_start, frame_end,
                     # inverted_safe: a parent scale keyed through zero (a
                     # common hide trick) must not abort the whole bake
                     matrix = parent_matrix.inverted_safe() @ matrix
-                reference = previous_euler.get(obj.name)
-                euler = matrix.to_euler('XYZ', reference) if reference else matrix.to_euler('XYZ')
+                # signed decomposition keeps mirrored (negative-scale) objects
+                # mirrored instead of silently un-flipping them
+                location, euler, scale = decompose_signed(
+                    matrix, previous_euler.get(obj.name))
                 previous_euler[obj.name] = euler
-                samples[obj.name].append(as_row(matrix, euler))
+                samples[obj.name].append(as_row(location, euler, scale))
             if camera_sampler is not None:
                 # camera sampled in the SAME sweep: a second full timeline
                 # evaluation used to double the bake time
@@ -681,6 +709,7 @@ class CameraSampler:
                                    or self.parent_obj.name in staged_names))
         self.locations, self.forwards, self.ups = [], [], []
         self.parent_locations, self.parent_rotations, self.parent_scales = [], [], []
+        self.focus_distances = []
         self._parent_euler = None
 
     def sample(self, depsgraph):
@@ -707,6 +736,18 @@ class CameraSampler:
             self.parent_locations.append([round(v, 5) for v in p_loc])
             self.parent_rotations.append([round(p_pitch, 5), round(p_yaw, 5), round(p_roll, 5)])
             self.parent_scales.append([round(v, 5) for v in p_scale])
+
+        # animated depth of field: sample the focus distance per frame
+        # (focus_object evaluated through the depsgraph, so a moving target
+        # is followed)
+        dof = getattr(self.camera_obj.data, 'dof', None)
+        if dof is not None and dof.use_dof:
+            distance = dof.focus_distance
+            if dof.focus_object is not None:
+                target = dof.focus_object.evaluated_get(depsgraph)
+                distance = (target.matrix_world.translation
+                            - matrix.translation).length
+            self.focus_distances.append(round(distance * 100.0, 3))
 
 
 def build_camera_payload(context, camera_obj, frame_start, frame_end,
@@ -742,32 +783,55 @@ def build_camera_payload(context, camera_obj, frame_start, frame_end,
     parent_scales = sampler.parent_scales
 
     camera_data = camera_obj.data
-    sensor_width = camera_data.sensor_width
     aspect_x = render.resolution_x * render.pixel_aspect_x
     aspect_y = render.resolution_y * render.pixel_aspect_y
-    sensor_height = sensor_width * (aspect_y / aspect_x) if aspect_x else camera_data.sensor_height
+    # match Blender's sensor-fit rules, or portrait renders get a wrong FOV:
+    # HORIZONTAL: sensor_width drives; VERTICAL: sensor_height drives;
+    # AUTO: sensor_width applies to the dominant side of the resolution
+    fit = camera_data.sensor_fit
+    if fit == 'AUTO':
+        fit = 'HORIZONTAL' if aspect_x >= aspect_y else 'VERTICAL'
+        driving = camera_data.sensor_width
+    else:
+        driving = (camera_data.sensor_width if fit == 'HORIZONTAL'
+                   else camera_data.sensor_height)
+    if fit == 'HORIZONTAL':
+        sensor_width = driving
+        sensor_height = driving * (aspect_y / aspect_x) if aspect_x else camera_data.sensor_height
+    else:
+        sensor_height = driving
+        sensor_width = driving * (aspect_x / aspect_y) if aspect_y else camera_data.sensor_width
 
     # Depth of field: Unreal's CineCamera defaults to a manual focus distance
     # that has nothing to do with the shot, so an un-blurred Blender camera
-    # arrives blurred. Mirror Blender's setting instead of leaving the default.
-    # Sampled at frame_start (not the .blend's current frame) so the value
-    # matches the sequence's rest state; animated focus is not carried yet.
+    # arrives blurred. Mirror Blender's setting instead, and ship the
+    # per-frame focus curve so animated focus (or a moving focus target)
+    # becomes a real track in the sequence.
     dof = getattr(camera_data, 'dof', None)
     focus = {'enabled': False, 'distance_cm': 0.0, 'fstop': 2.8}
     if dof is not None and dof.use_dof:
-        scene.frame_set(int(frame_start))
-        try:
-            distance = dof.focus_distance
-            if dof.focus_object is not None:
-                target = dof.focus_object.matrix_world.to_translation()
-                distance = (target - camera_obj.matrix_world.to_translation()).length
+        distances = list(sampler.focus_distances)
+        if distances:
             focus = {
                 'enabled': True,
-                'distance_cm': round(distance * 100.0, 3),
+                'distance_cm': distances[0],
                 'fstop': round(dof.aperture_fstop, 4),
+                'distances_cm': distances,
             }
-        finally:
-            scene.frame_set(original_frame)
+        else:
+            scene.frame_set(int(frame_start))
+            try:
+                distance = dof.focus_distance
+                if dof.focus_object is not None:
+                    target = dof.focus_object.matrix_world.to_translation()
+                    distance = (target - camera_obj.matrix_world.to_translation()).length
+                focus = {
+                    'enabled': True,
+                    'distance_cm': round(distance * 100.0, 3),
+                    'fstop': round(dof.aperture_fstop, 4),
+                }
+            finally:
+                scene.frame_set(original_frame)
 
     return {
         'name': camera_obj.name,
@@ -815,6 +879,7 @@ def build_scene_graph(objects):
         prim_path = f'{base_path}/{sanitize_prim_name(obj.name)}'
         prim_paths[obj.name] = prim_path
         is_mesh = obj.type == 'MESH' and obj.data is not None
+        location, euler, scale = decompose_signed(matrix)
         entries.append({
             'name': obj.name,
             'type': 'MESH' if is_mesh else 'EMPTY',
@@ -822,9 +887,9 @@ def build_scene_graph(objects):
             'data_key': cached_geometry_key(obj.data) if is_mesh else None,
             'prim_path': prim_path,
             'parent': parent,
-            'location': convert_blender_to_unreal_location(matrix.to_translation()),
-            'rotation': convert_blender_rotation_to_unreal_rotation(matrix.to_euler()),
-            'scale': list(matrix.to_scale()),
+            'location': convert_blender_to_unreal_location(location),
+            'rotation': convert_blender_rotation_to_unreal_rotation(euler),
+            'scale': list(scale),
         })
     return entries
 
@@ -881,7 +946,7 @@ def export_skeletal_usd(filepath, asset):
             temporarily_unique_material_names(materials), \
             isolated_selection(asset['objects']), \
             action_frame_range(bpy.context, asset, True), \
-            at_world_origin(asset):
+            at_neutral_root(asset):
         bpy.ops.wm.usd_export(
             filepath=filepath,
             selected_objects_only=True,
@@ -951,8 +1016,8 @@ def export_usd_hierarchy(filepath, objects, export_materials=True):
         bpy.context.view_layer.objects.active = original_active
 
     tagged = inject_kind_metadata(filepath)
-    asset_hints = rename_mesh_prims_to_object_names(filepath)
-    return tagged, asset_hints
+    asset_hints, data_hints = rename_mesh_prims_to_object_names(filepath)
+    return tagged, asset_hints, data_hints
 
 
 def rename_mesh_prims_to_object_names(filepath):
@@ -963,17 +1028,19 @@ def rename_mesh_prims_to_object_names(filepath):
     object name (e.g. C4D imports). Unreal names its static mesh assets after
     the Mesh prim, so without this pass the assets get unpredictable names
     (data names + collision suffixes) and can't be matched back to objects.
-    Returns {xform_prim_name: final_mesh_prim_name} used as matching hints.
+    Returns two hint dicts: {xform_prim_name: final_mesh_prim_name} and
+    {original_mesh_prim_name: final_mesh_prim_name}, both used for matching.
     """
     try:
         from pxr import Usd, Sdf
     except ImportError:
-        return {}
+        return {}, {}
 
     stage = Usd.Stage.Open(filepath)
     layer = stage.GetRootLayer()
     edit = Sdf.BatchNamespaceEdit()
     hints = {}
+    data_hints = {}
     used_names = set()
     edit_count = 0
     display_changed = 0
@@ -997,6 +1064,11 @@ def rename_mesh_prims_to_object_names(filepath):
             suffix += 1
         used_names.add(final)
         hints[parent.GetName()] = final
+        # second index keyed by the ORIGINAL mesh prim name (= the Blender
+        # mesh DATA name, unique in the file): object names like 'Cube.001'
+        # and 'Cube_001' sanitize identically and would collide in `hints`,
+        # while their data names still tell them apart
+        data_hints.setdefault(prim.GetName(), final)
 
         # UE's USD importer names assets after the prim's *displayName*
         # metadata when present - Blender writes the mesh DATA name there,
@@ -1013,10 +1085,10 @@ def rename_mesh_prims_to_object_names(filepath):
 
     if edit_count and not layer.Apply(edit):
         print("USD Scene Sync: mesh prim rename failed, keeping original names")
-        return {}
+        return {}, {}
     if edit_count or display_changed:
         layer.Save()
-    return hints
+    return hints, data_hints
 
 
 def inject_kind_metadata(filepath):
@@ -1234,6 +1306,13 @@ def reduce_channel_keys(values, seed_offsets, tolerance):
 
 
 try:
+    # the whole flow depends on the USD Importer plugin: fail early with a
+    # clear message instead of a confusing import error further down
+    if not hasattr(unreal, 'UsdStageImportOptions'):
+        raise RuntimeError('USD Importer plugin is not enabled in this Unreal '
+                           'project. Enable it (the Connection Doctor can do '
+                           'it) and restart Unreal.')
+
     dest = PAYLOAD['content_folder']
     scene_tag = 'B2UE:' + PAYLOAD['scene_name']
 
@@ -1979,6 +2058,35 @@ try:
                         pass
                     result['camera_package'] = 1 + len(converted)
 
+                # 6b-ter) Animated depth of field: a float track on the
+                # camera binding with a component-traversing property path.
+                # (A separate component binding under a spawnable comes back
+                # invalid from python, the traversing path resolves fine.)
+                focus_curve = (camera_data.get('focus') or {}).get('distances_cm') or []
+                if focus_curve and max(focus_curve) - min(focus_curve) > 0.1:
+                    try:
+                        focus_track = cam_binding.add_track(unreal.MovieSceneFloatTrack)
+                        focus_track.set_property_name_and_path(
+                            'ManualFocusDistance',
+                            'CameraComponent.FocusSettings.ManualFocusDistance')
+                        focus_section = focus_track.add_section()
+                        focus_section.set_range(0, frame_count)
+                        focus_channel = focus_section.get_all_channels()[0]
+                        if authored_keys:
+                            value_range = max(focus_curve) - min(focus_curve)
+                            focus_pairs = reduce_channel_keys(
+                                focus_curve, cam_seeds,
+                                max(0.1, 0.001 * value_range))
+                        else:
+                            focus_pairs = [[offset, value]
+                                           for offset, value in enumerate(focus_curve)]
+                        for offset, value in focus_pairs:
+                            add_channel_key(focus_channel, offset, value)
+                        result['focus_keys'] = len(focus_pairs)
+                    except Exception as error:
+                        log('animated focus track failed (static focus kept): %s'
+                            % str(error)[:120])
+
                 # Camera Cuts track so the sequence renders through this camera
                 try:
                     cut_track = sequence.add_track(unreal.MovieSceneCameraCutTrack)
@@ -2187,8 +2295,30 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         self._summary_cache = (key, summary)
         return summary
 
+    # dialog options remembered per scene (saved in execute, restored here)
+    REMEMBERED_OPTIONS = (
+        'source', 'place_in_level', 'replace_existing', 'import_materials',
+        'fix_two_sided', 'include_skeletal', 'include_animation',
+        'include_camera', 'camera_spawnable', 'preserve_hierarchy', 'key_mode',
+    )
+
     def invoke(self, context, event):
+        settings = context.scene.unreal_toolkit_settings
+        if settings.sync_options_saved:
+            for name in self.REMEMBERED_OPTIONS:
+                stored = getattr(settings, f'sync_{name}', None)
+                if stored is not None and stored != '':
+                    try:
+                        setattr(self, name, stored)
+                    except TypeError:
+                        pass  # stored enum value no longer exists
         return context.window_manager.invoke_props_dialog(self, width=400)
+
+    def _remember_options(self, context):
+        settings = context.scene.unreal_toolkit_settings
+        for name in self.REMEMBERED_OPTIONS:
+            setattr(settings, f'sync_{name}', getattr(self, name))
+        settings.sync_options_saved = True
 
     def draw(self, context):
         layout = self.layout
@@ -2237,6 +2367,27 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         box.label(text="Requires: UE open + 'USD Importer' plugin", icon='INFO')
 
     def execute(self, context):
+        self._remember_options(context)
+        wm = context.window_manager
+        wm.progress_begin(0, 100)
+        try:
+            return self._execute_sync(context, wm)
+        finally:
+            wm.progress_end()
+            try:
+                context.workspace.status_text_set(None)
+            except Exception:
+                pass
+
+    def _step(self, context, wm, value, label):
+        wm.progress_update(value)
+        try:
+            context.workspace.status_text_set(f"Kelit Toolkit: {label}")
+        except Exception:
+            pass
+        print(f"[KelitToolkit] {label}")
+
+    def _execute_sync(self, context, wm):
         objects = self._resolve_objects(context)
         skeletal_assets = []
         if self.include_skeletal:
@@ -2254,16 +2405,20 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         script_path = os.path.join(staging_dir, f'{scene_name}_ue_import.py')
 
         # 1) Export USD with kind tags + deterministic mesh prim names
+        self._step(context, wm, 10, "exporting USD...")
         tagged = {'component': 0, 'group': 0}
         asset_hints = {}
+        data_hints = {}
         if mesh_objects:
             try:
-                tagged, asset_hints = export_usd_hierarchy(usd_path, objects, self.import_materials)
+                tagged, asset_hints, data_hints = export_usd_hierarchy(
+                    usd_path, objects, self.import_materials)
             except RuntimeError as error:
                 self.report({'ERROR'}, f"USD export failed: {error}")
                 return {'CANCELLED'}
         else:
             usd_path = None
+        self._step(context, wm, 25, "USD exported")
 
         # 1b) One USD per skeletal asset (armature + skinned meshes + action)
         skeletal_payload = []
@@ -2276,19 +2431,27 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
                 self.report({'ERROR'}, f"Skeletal USD export failed ({asset['name']}): {error}")
                 return {'CANCELLED'}
             matrix = asset['root'].matrix_world
+            location, euler, scale = decompose_signed(matrix)
             skeletal_payload.append({
                 'name': asset['name'],
                 'asset_name': asset_name,
                 'usd_file': skel_path.replace('\\', '/'),
-                'location': convert_blender_to_unreal_location(matrix.to_translation()),
-                'rotation': convert_blender_rotation_to_unreal_rotation(matrix.to_euler()),
-                'scale': list(matrix.to_scale()),
+                'location': convert_blender_to_unreal_location(location),
+                'rotation': convert_blender_rotation_to_unreal_rotation(euler),
+                'scale': list(scale),
             })
 
         # 2) Build the payload + Unreal-side script
         graph = build_scene_graph(objects)
         for entry in graph:
-            entry['asset_hint'] = asset_hints.get(sanitize_prim_name(entry['name']))
+            # the data-name index wins: object names like 'Cube.001' and
+            # 'Cube_001' sanitize to the same key, mesh data names do not
+            hint = None
+            if entry.get('mesh_name'):
+                hint = data_hints.get(sanitize_prim_name(entry['mesh_name']))
+            if hint is None:
+                hint = asset_hints.get(sanitize_prim_name(entry['name']))
+            entry['asset_hint'] = hint
 
         content_root = (settings.usd_content_folder or '/Game/BlenderSync').rstrip('/')
         scene = context.scene
@@ -2318,6 +2481,8 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         # in world space otherwise. The camera (and its ancestors) must be in
         # the temporarily-visible set too: a viewport-hidden camera is
         # excluded from the depsgraph and would bake frozen motion.
+        if self.include_animation:
+            self._step(context, wm, 35, "baking animation...")
         if self.include_animation:
             camera_obj = scene.camera
             with_camera = (self.include_camera and camera_obj is not None
@@ -2361,16 +2526,26 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
             script_file.write(script)
 
         # 3) Run it in the Unreal Editor through the remote-execution channel
+        self._step(context, wm, 55,
+                   "sending to Unreal (import + placement, this can take a while)...")
         script_fwd = script_path.replace('\\', '/')
         success, output = run_unreal_python([
             f'exec(compile(open("{script_fwd}", encoding="utf-8").read(), "b2ue_usd_sync", "exec"))'
         ])
+        self._step(context, wm, 90, "Unreal answered, reading the result...")
 
         if not success:
             self.report({'ERROR'}, f"Unreal connection failed: {output}")
+            # open the doctor: it explains why and can fix the project files
+            bpy.ops.unreal_toolkit.connection_doctor('INVOKE_DEFAULT')
             return {'CANCELLED'}
 
         result, error = parse_sync_result(output)
+        if error and 'USD Importer' in error:
+            self.report({'ERROR'}, "The USD Importer plugin is not enabled in this "
+                                   "Unreal project")
+            bpy.ops.unreal_toolkit.connection_doctor('INVOKE_DEFAULT')
+            return {'CANCELLED'}
         if error and 'unreadable' in error:
             # the run completed - only its report line failed to parse
             self.report({'WARNING'}, "Sync completed but the result summary was "
@@ -2819,7 +2994,7 @@ class UNREAL_OT_usd_export_hierarchy(bpy.types.Operator):
             filepath += '.usda'
 
         try:
-            tagged, _hints = export_usd_hierarchy(filepath, objects)
+            tagged, _hints, _data_hints = export_usd_hierarchy(filepath, objects)
         except RuntimeError as error:
             self.report({'ERROR'}, f"USD export failed: {error}")
             return {'CANCELLED'}

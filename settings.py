@@ -44,6 +44,21 @@ class UnrealToolkitSettings(bpy.types.PropertyGroup):
         default="/Game/BlenderSync"
     )
 
+    # Last-used options of the sync dialog, remembered per scene so they
+    # survive Blender restarts instead of resetting to defaults
+    sync_source: bpy.props.StringProperty(default='SELECTED')
+    sync_place_in_level: bpy.props.BoolProperty(default=True)
+    sync_replace_existing: bpy.props.BoolProperty(default=True)
+    sync_import_materials: bpy.props.BoolProperty(default=True)
+    sync_fix_two_sided: bpy.props.BoolProperty(default=False)
+    sync_include_skeletal: bpy.props.BoolProperty(default=True)
+    sync_include_animation: bpy.props.BoolProperty(default=False)
+    sync_include_camera: bpy.props.BoolProperty(default=True)
+    sync_camera_spawnable: bpy.props.BoolProperty(default=True)
+    sync_preserve_hierarchy: bpy.props.BoolProperty(default=True)
+    sync_key_mode: bpy.props.StringProperty(default='AUTHORED')
+    sync_options_saved: bpy.props.BoolProperty(default=False)
+
 
 class KelitToolkitPreferences(bpy.types.AddonPreferences):
     """Add-on preferences: Unreal remote-execution endpoints, for projects

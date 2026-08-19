@@ -20,7 +20,7 @@
 bl_info = {
     "name": "Kelit Toolkit",
     "author": "Kélit Raynaud",
-    "version": (0, 9, 0),
+    "version": (0, 9, 1),
     "blender": (5, 0, 0),
     "location": "3D View > Sidebar (N) > Kelit Toolkit",
     "description": "Prepare and send Blender scenes to Unreal Engine: naming, collisions, "

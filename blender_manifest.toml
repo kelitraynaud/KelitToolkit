@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "kelittoolkit"
-version = "0.9.0"
+version = "0.9.1"
 name = "Kelit Toolkit"
 tagline = "Prepare and send Blender scenes to Unreal Engine"
 maintainer = "Kélit Raynaud <kelitraynaud@gmail.com>"
@@ -17,3 +17,7 @@ copyright = [
   "2026 Kélit Raynaud",
   "Epic Games, Inc. - dependencies/remote_execution.py, MIT (see dependencies/LICENSE-BlenderTools.txt)",
 ]
+
+[permissions]
+network = "Sends Python commands to the local Unreal Editor (remote execution, localhost)"
+files = "Exports USD/FBX files and can fix the Unreal project's configuration files"

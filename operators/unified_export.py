@@ -225,6 +225,31 @@ def at_world_origin(asset):
             member.matrix_world = original_matrix
 
 
+@contextlib.contextmanager
+def at_neutral_root(asset):
+    """Temporarily neutralize the root's FULL transform (identity), members
+    following in relative space, then restore. Used by the skeletal sync
+    export: the spawn re-applies location, rotation and scale from the
+    payload, so any rotation or scale left in the file would be applied
+    twice."""
+    root = asset['root']
+    if root is None:
+        yield
+        return
+    root_inverse = root.matrix_world.inverted_safe()
+    moved = []
+    for member in asset['objects']:
+        original_matrix = member.matrix_world.copy()
+        moved.append((member, original_matrix))
+        member.matrix_world = root_inverse @ original_matrix
+    bpy.context.view_layer.update()
+    try:
+        yield
+    finally:
+        for member, original_matrix in moved:
+            member.matrix_world = original_matrix
+
+
 # ============================================================================
 # FORMAT BACKENDS
 # ============================================================================
