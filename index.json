@@ -1,0 +1,36 @@
+{
+  "version": "v1",
+  "blocklist": [],
+  "data": [
+    {
+      "schema_version": "1.0.0",
+      "id": "kelittoolkit",
+      "name": "Kelit Toolkit",
+      "tagline": "Prepare and send Blender scenes to Unreal Engine",
+      "version": "0.9.1",
+      "type": "add-on",
+      "maintainer": "K\u00e9lit Raynaud <kelitraynaud@gmail.com>",
+      "license": [
+        "SPDX:GPL-3.0-or-later"
+      ],
+      "blender_version_min": "5.0.0",
+      "website": "https://github.com/kelitraynaud/KelitToolkit",
+      "copyright": [
+        "2026 K\u00e9lit Raynaud",
+        "Epic Games, Inc. - dependencies/remote_execution.py, MIT (see dependencies/LICENSE-BlenderTools.txt)"
+      ],
+      "permissions": {
+        "network": "Sends Python commands to the local Unreal Editor (remote execution, localhost)",
+        "files": "Exports USD/FBX files and can fix the Unreal project's configuration files"
+      },
+      "tags": [
+        "Pipeline",
+        "Import-Export",
+        "Scene"
+      ],
+      "archive_url": "./kelittoolkit-0.9.1.zip",
+      "archive_size": 136686,
+      "archive_hash": "sha256:79c2b2f3d01511acd7ad968f00e98f2486f5552bf6d08cad6313625be2ee96a4"
+    }
+  ]
+}
