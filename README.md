@@ -78,11 +78,9 @@ than by UE's USD actor import (which nests everything under one actor):
   imports (a key per frame) collapse to minimal keys. `Every Frame (exact)`
   gives a dense bake instead;
 - the scene camera becomes a **CineCameraActor** with focal length, filmback
-  and depth of field from Blender, wired to a **Camera Cuts track**;
-  **animated focus** (keyed focus distance or a moving focus target) becomes
-  a real focus track on the camera component; by default the camera (and the
-  null chain that only drives it) is carried inside the sequence as
-  spawnables;
+  and depth of field from Blender, wired to a **Camera Cuts track**; by
+  default the camera (and the null chain that only drives it) is carried
+  inside the sequence as spawnables;
 - mirrored (negative-scale) objects keep their mirroring;
 - cache-driven duplicates (a keyframed hierarchy shipped together with an
   Alembic-cache copy of itself) are skipped automatically;
@@ -168,7 +166,9 @@ only if you need it: double-sided shading costs performance.
 **The camera arrives blurred**
 Unreal's CineCamera defaults to a 1 km manual focus. The sync mirrors
 Blender's depth of field instead: check your camera's *Depth of Field*
-checkbox in Blender. Animated focus is carried as a track since 0.9.1.
+checkbox in Blender. Animated focus is applied as its first-frame value for
+now: authoring sequence focus tracks from python crashes UE 5.8's Sequencer
+on open, so the animated version is on hold until a safe route exists.
 
 **An FBX I imported by hand looks wrong in UE 5.5+**
 Unreal's Interchange importer handles some FBX differently. **Fix
@@ -221,14 +221,21 @@ from the repository, remove the zip-installed copy so only one version runs.
 
 ## Versioning
 
-**0.9.1**: current pre-release:
+**0.9.2**: safety release. The animated-focus track shipped in 0.9.1 could
+crash Unreal's Sequencer when the synced sequence was opened (a UE 5.8
+limitation on python-authored focus tracks). The track is no longer created;
+animated focus falls back to its first-frame value. Also adds the one-click
+**Enable Native Updates** button (preferences and Advanced panel).
+
+**0.9.1**:
 
 - Connection Doctor: on a failed send, a dialog reads the Unreal project
   files, shows what is missing (Python plugin, USD Importer, remote
   execution) and fixes it with backups.
 - Progress feedback during the sync (per-phase cursor and status text).
 - Sync dialog options remembered per scene.
-- Animated depth of field carried as a focus track on the camera component.
+- Animated depth of field sampled per frame (rolled back to static in 0.9.2,
+  see above).
 - Mirrored (negative-scale) objects keep their mirroring everywhere
   (placement, animation, skeletal).
 - Skeletal export neutralizes the full root transform (no more double

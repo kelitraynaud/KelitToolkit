@@ -2058,34 +2058,18 @@ try:
                         pass
                     result['camera_package'] = 1 + len(converted)
 
-                # 6b-ter) Animated depth of field: a float track on the
-                # camera binding with a component-traversing property path.
-                # (A separate component binding under a spawnable comes back
-                # invalid from python, the traversing path resolves fine.)
+                # Animated depth of field is NOT keyed as a sequence track
+                # for now: every python route tried (component possessable of
+                # a spawnable template, float track with a component-traversing
+                # property path) produced a sequence that CRASHES the editor
+                # when opened in Sequencer (UE 5.8). The per-frame focus curve
+                # is still sampled and shipped in the payload; the static
+                # first-frame value is applied to the camera instead.
                 focus_curve = (camera_data.get('focus') or {}).get('distances_cm') or []
                 if focus_curve and max(focus_curve) - min(focus_curve) > 0.1:
-                    try:
-                        focus_track = cam_binding.add_track(unreal.MovieSceneFloatTrack)
-                        focus_track.set_property_name_and_path(
-                            'ManualFocusDistance',
-                            'CameraComponent.FocusSettings.ManualFocusDistance')
-                        focus_section = focus_track.add_section()
-                        focus_section.set_range(0, frame_count)
-                        focus_channel = focus_section.get_all_channels()[0]
-                        if authored_keys:
-                            value_range = max(focus_curve) - min(focus_curve)
-                            focus_pairs = reduce_channel_keys(
-                                focus_curve, cam_seeds,
-                                max(0.1, 0.001 * value_range))
-                        else:
-                            focus_pairs = [[offset, value]
-                                           for offset, value in enumerate(focus_curve)]
-                        for offset, value in focus_pairs:
-                            add_channel_key(focus_channel, offset, value)
-                        result['focus_keys'] = len(focus_pairs)
-                    except Exception as error:
-                        log('animated focus track failed (static focus kept): %s'
-                            % str(error)[:120])
+                    log('animated focus detected: carried as static first-frame '
+                        'focus for now (sequence focus tracks are unsafe to '
+                        'author from python in UE 5.8)')
 
                 # Camera Cuts track so the sequence renders through this camera
                 try:
