@@ -255,6 +255,8 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
                      text="Test Unreal Connection", icon='CHECKMARK')
         col.operator(UNREAL_OT_connection_doctor.bl_idname,
                      text="Connection Doctor (Setup Help)", icon='COMMUNITY')
+        col.operator("unreal_toolkit.setup_update_repo",
+                     text="Enable Native Updates", icon='FILE_REFRESH')
         col.operator(UNREAL_OT_usd_clear_synced.bl_idname,
                      text="Clear All Synced Actors", icon='TRASH')
 

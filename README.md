@@ -188,14 +188,15 @@ Updates below).
 
 ## Updates
 
-Blender 4.2+ can update the add-on natively. One-time setup:
+Blender can update the add-on natively. One click: in the add-on
+preferences (or the panel's Advanced section), press **Enable Native
+Updates**. It registers the toolkit's update repository and Blender then
+shows new versions in *Preferences > Get Extensions*.
 
-1. *Edit > Preferences > Get Extensions > Repositories >* **+** *> Add
-   Remote Repository*
-2. URL: `https://kelitraynaud.github.io/KelitToolkit/index.json`
-3. Install Kelit Toolkit from that repository (search it in Get Extensions).
-
-Blender then shows updates like for any extension.
+Manual equivalent: add
+`https://kelitraynaud.github.io/KelitToolkit/index.json` as a remote
+repository in *Get Extensions > Repositories*. If you install the toolkit
+from the repository, remove the zip-installed copy so only one version runs.
 
 ## Technical notes (UE 5.8)
 

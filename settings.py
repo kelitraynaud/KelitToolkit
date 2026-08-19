@@ -60,9 +60,72 @@ class UnrealToolkitSettings(bpy.types.PropertyGroup):
     sync_options_saved: bpy.props.BoolProperty(default=False)
 
 
+UPDATE_REPO_URL = "https://kelitraynaud.github.io/KelitToolkit/index.json"
+UPDATE_REPO_NAME = "Kelit Toolkit"
+
+
+def find_update_repo(context):
+    """The registered Kelit Toolkit extension repository, or None."""
+    try:
+        repos = context.preferences.extensions.repos
+    except AttributeError:
+        return None
+    for repo in repos:
+        if getattr(repo, 'remote_url', '') == UPDATE_REPO_URL:
+            return repo
+    return None
+
+
+class PREFERENCES_OT_setup_update_repo(bpy.types.Operator):
+    """Register the Kelit Toolkit extension repository in Blender, so new
+    versions show up natively in Preferences > Get Extensions. If you then
+    install the toolkit from that repository, remove this zip-installed copy
+    to avoid running two versions at once"""
+    bl_idname = "unreal_toolkit.setup_update_repo"
+    bl_label = "Enable Native Updates"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        try:
+            repos = context.preferences.extensions.repos
+        except AttributeError:
+            self.report({'WARNING'},
+                        "This Blender version has no extension repositories")
+            return {'CANCELLED'}
+
+        if find_update_repo(context) is not None:
+            self.report({'INFO'}, "Update repository already registered")
+            return {'FINISHED'}
+
+        try:
+            repo = repos.new(name=UPDATE_REPO_NAME,
+                             module="kelittoolkit_updates",
+                             remote_url=UPDATE_REPO_URL)
+        except TypeError:
+            repo = repos.new()
+            repo.name = UPDATE_REPO_NAME
+            repo.module = "kelittoolkit_updates"
+        if hasattr(repo, 'use_remote_url'):
+            repo.use_remote_url = True
+        repo.remote_url = UPDATE_REPO_URL
+
+        try:
+            bpy.ops.wm.save_userpref()
+        except Exception:
+            pass
+        # first sync so the extension shows up right away (needs network)
+        try:
+            bpy.ops.extensions.repo_sync_all()
+        except Exception:
+            pass
+        self.report({'INFO'}, "Repository added: updates now show in "
+                              "Preferences > Get Extensions")
+        return {'FINISHED'}
+
+
 class KelitToolkitPreferences(bpy.types.AddonPreferences):
-    """Add-on preferences: Unreal remote-execution endpoints, for projects
-    that changed UE's defaults (Project Settings > Plugins > Python)."""
+    """Add-on preferences: native updates and Unreal remote-execution
+    endpoints, for projects that changed UE's defaults."""
     bl_idname = __package__
 
     multicast_group: bpy.props.StringProperty(
@@ -85,8 +148,21 @@ class KelitToolkitPreferences(bpy.types.AddonPreferences):
         default=6776, min=1, max=65535
     )
 
-    def draw(self, _context):
+    def draw(self, context):
         layout = self.layout
+
+        box = layout.box()
+        box.label(text="Updates:", icon='FILE_REFRESH')
+        if find_update_repo(context) is not None:
+            box.label(text="Native updates enabled: new versions appear in "
+                           "Preferences > Get Extensions", icon='CHECKMARK')
+        else:
+            box.operator(PREFERENCES_OT_setup_update_repo.bl_idname,
+                         icon='URL')
+            box.label(text="Registers the toolkit's update repository in "
+                           "Blender (one click, once)")
+
+        layout.separator()
         layout.label(text="Unreal remote execution - only change these if your "
                           "UE project uses non-default Python settings:")
         row = layout.row()
@@ -97,6 +173,7 @@ class KelitToolkitPreferences(bpy.types.AddonPreferences):
 
 def register():
     bpy.utils.register_class(UnrealToolkitSettings)
+    bpy.utils.register_class(PREFERENCES_OT_setup_update_repo)
     bpy.utils.register_class(KelitToolkitPreferences)
     bpy.types.Scene.unreal_toolkit_settings = bpy.props.PointerProperty(type=UnrealToolkitSettings)
 
@@ -104,4 +181,5 @@ def register():
 def unregister():
     del bpy.types.Scene.unreal_toolkit_settings
     bpy.utils.unregister_class(KelitToolkitPreferences)
+    bpy.utils.unregister_class(PREFERENCES_OT_setup_update_repo)
     bpy.utils.unregister_class(UnrealToolkitSettings)
