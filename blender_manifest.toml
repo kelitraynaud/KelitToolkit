@@ -1,0 +1,19 @@
+schema_version = "1.0.0"
+
+id = "kelittoolkit"
+version = "0.9.0"
+name = "Kelit Toolkit"
+tagline = "Prepare and send Blender scenes to Unreal Engine"
+maintainer = "Kélit Raynaud <kelitraynaud@gmail.com>"
+type = "add-on"
+
+website = "https://github.com/kelitraynaud/KelitToolkit"
+tags = ["Pipeline", "Import-Export", "Scene"]
+
+blender_version_min = "5.0.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+copyright = [
+  "2026 Kélit Raynaud",
+  "Epic Games, Inc. - dependencies/remote_execution.py, MIT (see dependencies/LICENSE-BlenderTools.txt)",
+]

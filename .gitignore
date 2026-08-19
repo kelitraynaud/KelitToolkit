@@ -1,0 +1,10 @@
+# Cache Python (regénéré par Blender à chaque lancement)
+__pycache__/
+*.py[cod]
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+
+# Archives de distribution construites localement
+*.zip
