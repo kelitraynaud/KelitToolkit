@@ -28,8 +28,10 @@ Open an issue describing the workflow problem first, not just the solution.
   must never call `actor.rename()` on a level actor: it is a fatal engine
   error. Read the "Technical notes" section of the README before touching the
   sync.
-- Test headless when possible: `blender -b --python tests/smoke_test.py -- report.json`
-  must stay green, and the same pattern works for new tests.
+- Run the test suite before opening a PR: `python tests/run_tests.py` (add
+  `--quick` to skip the slow bake test, `--pure` for the Blender-free part).
+  Headless tests live in `tests/headless/` and share `_harness.py`; the same
+  pattern works for new tests.
 
 ## License
 
