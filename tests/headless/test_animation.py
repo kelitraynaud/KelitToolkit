@@ -116,4 +116,79 @@ bpy.context.view_layer.update()
 graph = usd_sync.build_scene_graph([cube])
 t.check('graph_keeps_mirror', graph[0]['scale'][0] < 0)
 
+# ---- focus object off-axis: distance along the view axis, like Blender ----
+scene = t.fresh_scene()
+cam_data = bpy.data.cameras.new('FocusCam')
+camera = bpy.data.objects.new('FocusCam', cam_data)
+bpy.context.collection.objects.link(camera)
+camera.rotation_euler = (math.radians(90), 0, 0)   # looks down +Y
+target = bpy.data.objects.new('FocusTarget', None)
+bpy.context.collection.objects.link(target)
+target.location = (10 * math.sin(math.radians(30)), 10 * math.cos(math.radians(30)), 0)
+cam_data.dof.use_dof = True
+cam_data.dof.focus_object = target
+bpy.context.view_layer.update()
+sampler = usd_sync.CameraSampler(camera, set())
+sampler.sample(bpy.context.evaluated_depsgraph_get())
+t.check('focus_projected_on_view_axis',
+        bool(sampler.focus_distances) and abs(sampler.focus_distances[0] - 866.025) < 0.5,
+        sampler.focus_distances[:1])
+payload = usd_sync.build_camera_payload(bpy.context, camera, 1, 1, set())
+t.check('focus_static_projected', abs(payload['focus']['distance_cm'] - 866.025) < 0.5)
+
+# ---- export context managers on a mesh-under-mesh skeletal hierarchy ----
+scene = t.fresh_scene()
+unified_export = t.submodule('operators.unified_export')
+armature = bpy.data.objects.new('Rig', bpy.data.armatures.new('Rig'))
+armature.location = (5, 0, 0)
+armature.rotation_euler = (0, 0, 1.0)
+bpy.context.collection.objects.link(armature)
+bpy.context.view_layer.update()
+bpy.ops.mesh.primitive_cube_add(location=(5, 2, 0))
+head = bpy.context.active_object
+head.name = 'Head'
+head.parent = armature
+head.matrix_parent_inverse = armature.matrix_world.inverted()
+bpy.context.view_layer.update()
+bpy.ops.mesh.primitive_cube_add(location=(5, 2, 1))
+hair = bpy.context.active_object
+hair.name = 'Hair'
+hair.parent = head
+hair.matrix_parent_inverse = head.matrix_world.inverted()
+bpy.context.view_layer.update()
+bpy.ops.mesh.primitive_cube_add(location=(0, 0, 3))
+loose = bpy.context.active_object
+loose.name = 'Loose'   # deformed but not parented: re-based by hand
+bpy.context.view_layer.update()
+members = (armature, head, hair, loose)
+originals = {o.name: o.matrix_world.copy() for o in members}
+# Hair listed before Head: the order that used to move Hair twice
+asset = {'type': 'SKELETAL', 'name': 'Rig', 'root': armature,
+         'objects': [armature, hair, head, loose]}
+
+
+def close(a, b):
+    return all(abs(a[i][j] - b[i][j]) < 1e-5 for i in range(4) for j in range(4))
+
+
+root_inverse = armature.matrix_world.inverted()
+with unified_export.at_neutral_root(asset):
+    bpy.context.view_layer.update()
+    inside = {o.name: o.matrix_world.copy() for o in members}
+bpy.context.view_layer.update()
+t.check('neutral_root_identity', close(inside['Rig'], mathutils.Matrix.Identity(4)))
+t.check('neutral_root_members_follow', all(
+    close(inside[name], root_inverse @ originals[name]) for name in ('Head', 'Hair', 'Loose')))
+t.check('neutral_root_restored', all(close(o.matrix_world, originals[o.name]) for o in members))
+
+delta = armature.matrix_world.translation.copy()
+with unified_export.at_world_origin(asset):
+    bpy.context.view_layer.update()
+    inside = {o.name: o.matrix_world.copy() for o in members}
+bpy.context.view_layer.update()
+t.check('world_origin_shift', all(
+    (inside[name].translation - (originals[name].translation - delta)).length < 1e-5
+    for name in ('Rig', 'Head', 'Hair', 'Loose')))
+t.check('world_origin_restored', all(close(o.matrix_world, originals[o.name]) for o in members))
+
 t.finish('ANIMATION')

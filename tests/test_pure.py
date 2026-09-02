@@ -13,13 +13,19 @@ import types
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def load_function(relative_path, name):
-    """Extract one module-level function from a source file by AST."""
+def load_function(relative_path, name, constants=()):
+    """Extract one module-level function from a source file by AST, together
+    with the module-level constants it needs."""
     source = open(os.path.join(ROOT, relative_path), encoding='utf-8').read()
     tree = ast.parse(source)
+    namespace = {'re': __import__('re')}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id in constants
+                for target in node.targets):
+            exec(ast.get_source_segment(source, node), namespace)
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
-            namespace = {'re': __import__('re')}
             exec(ast.get_source_segment(source, node), namespace)
             return namespace[name]
     raise LookupError(f'{name} not found in {relative_path}')
@@ -72,6 +78,21 @@ def run():
     snake = load_function('operators/naming.py', 'to_snake_case_keeping_prefix')
     check('snake_keeps_prefix', snake('SM_MyChair') == 'SM_My_Chair')
     check('snake_plain', snake('MyChair') == 'My_Chair')
+    check('snake_keeps_lod', snake('SM_Chair_LOD2') == 'SM_Chair_LOD2')
+    check('snake_acronym', snake('SM_HDRICapture') == 'SM_HDRI_Capture')
+    check('snake_idempotent', snake('SM_My_Chair') == 'SM_My_Chair')
+
+    root_package = load_function('operators/ue_remote.py', 'addon_root_package')
+    check('root_package_classic', root_package('KelitToolkit.operators') == 'KelitToolkit')
+    check('root_package_extension',
+          root_package('bl_ext.user_default.kelittoolkit.operators')
+          == 'bl_ext.user_default.kelittoolkit')
+
+    no_editor = load_function('operators/unreal_link.py', 'is_no_editor_error',
+                              constants=('NO_EDITOR_MESSAGE',))
+    check('no_editor_detected', no_editor('No running Unreal Editor found. Open your UE project'))
+    check('no_editor_not_for_failed_command', not no_editor('Remote execution failed: boom'))
+    check('no_editor_not_for_none', not no_editor(None))
 
     sanitize = load_function('operators/usd_sync.py', 'sanitize_prim_name')
     check('sanitize_ascii', sanitize('Café Table') == 'Caf__Table')

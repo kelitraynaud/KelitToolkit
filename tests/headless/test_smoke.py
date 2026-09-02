@@ -96,5 +96,60 @@ t.check('apply_scale_applied', all(abs(v - 1.0) < 1e-6 for v in cube.scale)
 cube.scale = (-1.0, 1.0, 1.0)
 bpy.ops.object.apply_scale_instances()
 t.check('apply_scale_refuses_mirror', abs(cube.scale.x + 1.0) < 1e-6)
+cube.scale = (0.0, 1.0, 1.0)
+bpy.ops.object.apply_scale_instances()
+t.check('apply_scale_refuses_zero', abs(cube.scale.x) < 1e-6
+        and abs(max(v.co.x for v in cube.data.vertices) - 2.0) < 1e-4)
+
+# Apply All Transforms puts the selection and the active object back
+t.fresh_scene()
+bpy.ops.mesh.primitive_cube_add()
+cube = bpy.context.active_object
+cube.scale = (2.0, 2.0, 2.0)
+lamp = bpy.data.objects.new('lamp', bpy.data.lights.new('lamp', 'POINT'))
+bpy.context.collection.objects.link(lamp)
+lamp.select_set(True)
+bpy.context.view_layer.objects.active = lamp
+bpy.ops.object.apply_all_transforms()
+t.check('apply_all_applied', all(abs(v - 1.0) < 1e-6 for v in cube.scale))
+t.check('apply_all_selection_restored', lamp.select_get() and cube.select_get()
+        and bpy.context.view_layer.objects.active == lamp)
+
+# origin preset on a Ctrl+P-parented object (matrix_parent_inverse set):
+# the geometry must not move in world space
+t.fresh_scene()
+holder = bpy.data.objects.new('holder', None)
+holder.location = (10, 0, 0)
+bpy.context.collection.objects.link(holder)
+bpy.context.view_layer.update()
+bpy.ops.mesh.primitive_cube_add(location=(10, 0, 1))
+cube = bpy.context.active_object
+cube.parent = holder
+cube.matrix_parent_inverse = holder.matrix_world.inverted()
+bpy.context.view_layer.update()
+before = world_verts(cube)
+t.deselect_all()
+cube.select_set(True)
+bpy.context.view_layer.objects.active = cube
+bpy.ops.object.set_origin_preset(preset='BOTTOM_CENTER')
+bpy.context.view_layer.update()
+after = world_verts(cube)
+t.check('origin_parented_geometry_stays',
+        all(all(abs(a[i] - b[i]) < 1e-3 for i in range(3)) for a, b in zip(before, after)))
+t.check('origin_at_bottom', abs(min(v.co.z for v in cube.data.vertices)) < 1e-6)
+
+# UCX of an object with modifiers: hull of the evaluated shape, and the copy
+# carries no modifier (a Subsurf left on it re-shaped the hull at export)
+t.fresh_scene()
+bpy.ops.mesh.primitive_cube_add()
+cube = bpy.context.active_object
+cube.modifiers.new('Subdiv', 'SUBSURF').levels = 2
+bpy.ops.object.create_collision_mesh(collision_type='UCX')
+ucx = next((o for o in bpy.data.objects if o.name.startswith('UCX_')), None)
+t.check('ucx_no_modifiers', ucx is not None and len(ucx.modifiers) == 0)
+if ucx is not None:
+    evaluated = ucx.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    t.check('ucx_evaluated_is_raw', len(evaluated.data.vertices) == len(ucx.data.vertices))
+    t.check('ucx_follows_evaluated_shape', len(ucx.data.vertices) > 8)
 
 t.finish('SMOKE')

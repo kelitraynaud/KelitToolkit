@@ -36,6 +36,41 @@ t.check('doctor_uproject_valid_json', any(
     p.get('Name') == 'USDImporter' and p.get('Enabled') for p in data.get('Plugins', [])))
 t.check('doctor_bad_path_message', unreal_link.read_project_setup('Z:/nope')[1] is not None)
 
+# read-only .uproject (the Perforce default): a message, not a traceback
+import stat  # noqa: E402
+locked = tempfile.mkdtemp(prefix='kelit_locked_ue_')
+locked_uproject = os.path.join(locked, 'Locked.uproject')
+with open(locked_uproject, 'w', encoding='utf-8') as handle:
+    json.dump({'FileVersion': 3}, handle)
+os.chmod(locked_uproject, stat.S_IREAD)
+try:
+    fixed_locked, locked_error = unreal_link.fix_project_setup(locked)
+    t.check('doctor_readonly_message', fixed_locked == [] and locked_error is not None
+            and 'read-only' in locked_error, locked_error)
+except Exception as exc:  # noqa: BLE001
+    t.check('doctor_readonly_message', False, repr(exc))
+finally:
+    os.chmod(locked_uproject, stat.S_IWRITE | stat.S_IREAD)
+
+# a .uproject whose root is not an object: a message, not a traceback
+odd = tempfile.mkdtemp(prefix='kelit_odd_ue_')
+with open(os.path.join(odd, 'Odd.uproject'), 'w', encoding='utf-8') as handle:
+    json.dump([1, 2, 3], handle)
+t.check('doctor_non_object_json', unreal_link.read_project_setup(odd)[1] is not None)
+
+# accents survive the rewrite (no escape sequences in the .uproject)
+accented = tempfile.mkdtemp(prefix='kelit_cafe_ue_')
+accented_uproject = os.path.join(accented, 'Cafe.uproject')
+with open(accented_uproject, 'w', encoding='utf-8') as handle:
+    json.dump({'FileVersion': 3, 'Description': 'Café'}, handle, ensure_ascii=False)
+unreal_link.fix_project_setup(accented)
+t.check('doctor_keeps_accents', 'Café' in open(accented_uproject, encoding='utf-8').read())
+
+# the Doctor is only for "no editor answered"
+t.check('no_editor_error_scope',
+        unreal_link.is_no_editor_error(unreal_link.NO_EDITOR_MESSAGE)
+        and not unreal_link.is_no_editor_error('Remote execution failed: x'))
+
 # ---- remembered sync options ----
 scene = t.fresh_scene()
 scene_settings = scene.unreal_toolkit_settings
