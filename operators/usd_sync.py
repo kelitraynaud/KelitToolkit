@@ -279,23 +279,45 @@ def temporarily_opaque(materials):
         bsdf = get_principled(material)
         alpha = bsdf.inputs.get('Alpha')
         link = alpha.links[0]
+        attribute, previous = surface_method(material)
         undone.append((material, bsdf, link.from_node, link.from_socket,
-                       material.blend_method))
+                       attribute, previous))
         material.node_tree.links.remove(link)
         alpha.default_value = 1.0
-        try:
-            material.blend_method = 'OPAQUE'
-        except (AttributeError, TypeError):
-            pass
+        if attribute is not None:
+            try:
+                setattr(material, attribute,
+                        'DITHERED' if attribute == 'surface_render_method' else 'OPAQUE')
+            except (AttributeError, TypeError):
+                pass
     try:
         yield len(undone)
     finally:
-        for material, bsdf, from_node, from_socket, blend in undone:
+        for material, bsdf, from_node, from_socket, attribute, previous in undone:
             material.node_tree.links.new(from_socket, bsdf.inputs['Alpha'])
-            try:
-                material.blend_method = blend
-            except (AttributeError, TypeError):
-                pass
+            if attribute is not None:
+                try:
+                    setattr(material, attribute, previous)
+                except (AttributeError, TypeError):
+                    pass
+
+
+def surface_method(material):
+    """(attribute name, value) of the material's transparency mode. Blender
+    4.2+ calls it surface_render_method; blend_method is the deprecated alias
+    (a warning today, gone in a future release), read only as a fallback."""
+    for name in ('surface_render_method', 'blend_method'):
+        if hasattr(material, name):
+            return name, getattr(material, name)
+    return None, None
+
+
+def focus_distance_to(camera_matrix, target_location):
+    """Focus distance Blender uses for a focus object: the target's distance
+    measured ALONG the view axis, not the straight-line distance (a target
+    30 degrees off-axis at 10 m focuses at 8.66 m)."""
+    forward = -(camera_matrix.to_3x3().col[2].normalized())
+    return abs((target_location - camera_matrix.translation).dot(forward))
 
 
 def collect_materials(objects):
@@ -745,8 +767,7 @@ class CameraSampler:
             distance = dof.focus_distance
             if dof.focus_object is not None:
                 target = dof.focus_object.evaluated_get(depsgraph)
-                distance = (target.matrix_world.translation
-                            - matrix.translation).length
+                distance = focus_distance_to(matrix, target.matrix_world.translation)
             self.focus_distances.append(round(distance * 100.0, 3))
 
 
@@ -824,7 +845,7 @@ def build_camera_payload(context, camera_obj, frame_start, frame_end,
                 distance = dof.focus_distance
                 if dof.focus_object is not None:
                     target = dof.focus_object.matrix_world.to_translation()
-                    distance = (target - camera_obj.matrix_world.to_translation()).length
+                    distance = focus_distance_to(camera_obj.matrix_world, target)
                 focus = {
                     'enabled': True,
                     'distance_cm': round(distance * 100.0, 3),
@@ -1067,8 +1088,11 @@ def rename_mesh_prims_to_object_names(filepath):
         # second index keyed by the ORIGINAL mesh prim name (= the Blender
         # mesh DATA name, unique in the file): object names like 'Cube.001'
         # and 'Cube_001' sanitize identically and would collide in `hints`,
-        # while their data names still tell them apart
-        data_hints.setdefault(prim.GetName(), final)
+        # while their data names usually still tell them apart. Data names
+        # that sanitize alike too are ambiguous: dropped (None) rather than
+        # letting the second mesh inherit the first one's asset
+        data_key = prim.GetName()
+        data_hints[data_key] = None if data_key in data_hints else final
 
         # UE's USD importer names assets after the prim's *displayName*
         # metadata when present - Blender writes the mesh DATA name there,
@@ -2256,7 +2280,9 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
     def _dialog_summary(self, context):
         """Scene summary for draw(), cached: draw() runs on every dialog
         redraw and a full-scene recompute froze the popup on large scenes."""
-        key = (self.source, self.include_skeletal)
+        # include_animation is part of the key: _resolve_objects filters the
+        # cache-driven objects only in that mode
+        key = (self.source, self.include_skeletal, self.include_animation)
         cached = getattr(self, '_summary_cache', None)
         if cached is not None and cached[0] == key:
             return cached[1]
@@ -2521,7 +2547,10 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         if not success:
             self.report({'ERROR'}, f"Unreal connection failed: {output}")
             # open the doctor: it explains why and can fix the project files
-            bpy.ops.unreal_toolkit.connection_doctor('INVOKE_DEFAULT')
+            # (only when no editor answered, the case it diagnoses)
+            from .unreal_link import is_no_editor_error
+            if is_no_editor_error(output):
+                bpy.ops.unreal_toolkit.connection_doctor('INVOKE_DEFAULT')
             return {'CANCELLED'}
 
         result, error = parse_sync_result(output)
