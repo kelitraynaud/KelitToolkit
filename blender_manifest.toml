@@ -21,3 +21,11 @@ copyright = [
 [permissions]
 network = "Sends Python commands to the local Unreal Editor (remote execution, localhost)"
 files = "Exports USD/FBX files and can fix the Unreal project's configuration files"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "/*.zip",
+  "/tests/",
+]
