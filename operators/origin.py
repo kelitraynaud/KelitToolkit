@@ -105,12 +105,13 @@ class OBJECT_OT_set_origin_preset(bpy.types.Operator):
                 # new_world_pos = original_world_pos - world_offset
                 target_pos = original_world_pos - world_offset
 
-                # If object has no parent, we can set location directly in world space
-                if inst.parent is None:
-                    inst.location = target_pos
-                else:
-                    # If has parent, need to convert to local space
-                    inst.location = inst.parent.matrix_world.inverted() @ target_pos
+                # Set the WORLD translation directly: going through .location
+                # with parent.matrix_world.inverted() ignored the parent
+                # inverse matrix (Ctrl+P parenting) and delta transforms, so
+                # parented objects jumped by the parent's offset
+                new_matrix = inst.matrix_world.copy()
+                new_matrix.translation = target_pos
+                inst.matrix_world = new_matrix
 
             mesh_count += 1
 
@@ -254,12 +255,13 @@ class OBJECT_OT_set_origin_custom(bpy.types.Operator):
                 # new_world_pos = original_world_pos - world_offset
                 target_pos = original_world_pos - world_offset
 
-                # If object has no parent, we can set location directly in world space
-                if inst.parent is None:
-                    inst.location = target_pos
-                else:
-                    # If has parent, need to convert to local space
-                    inst.location = inst.parent.matrix_world.inverted() @ target_pos
+                # Set the WORLD translation directly: going through .location
+                # with parent.matrix_world.inverted() ignored the parent
+                # inverse matrix (Ctrl+P parenting) and delta transforms, so
+                # parented objects jumped by the parent's offset
+                new_matrix = inst.matrix_world.copy()
+                new_matrix.translation = target_pos
+                inst.matrix_world = new_matrix
 
             mesh_count += 1
 
@@ -376,12 +378,11 @@ class OBJECT_OT_set_origin_with_modifier_compensation(bpy.types.Operator):
             # Calculate target position to restore original world position
             target_pos = original_world_pos - world_offset
 
-            # Set location to restore original world position
-            if obj.parent is None:
-                obj.location = target_pos
-            else:
-                # If has parent, convert to local space
-                obj.location = obj.parent.matrix_world.inverted() @ target_pos
+            # Set the WORLD translation directly (see set_origin_preset: the
+            # .location route ignored matrix_parent_inverse and deltas)
+            new_matrix = obj.matrix_world.copy()
+            new_matrix.translation = target_pos
+            obj.matrix_world = new_matrix
 
             processed_count += 1
 
