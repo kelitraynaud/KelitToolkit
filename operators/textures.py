@@ -41,12 +41,6 @@ class OBJECT_OT_auto_setup_pbr_textures(bpy.types.Operator):
         default=True
     )
 
-    use_udim: bpy.props.BoolProperty(
-        name="Detect UDIM",
-        description="Detect and configure UDIM textures",
-        default=False
-    )
-
     # Enhanced patterns with more variations
     TEXTURE_PATTERNS = {
         'base_color': ['_BaseColor', '_Albedo', '_Diffuse', '_Color', '_BC', '_ALB', '_Base_Color', '_D'],
