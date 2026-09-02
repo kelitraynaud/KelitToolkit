@@ -201,6 +201,53 @@ def action_frame_range(context, asset, include_animation):
         scene.frame_start, scene.frame_end = original
 
 
+def _hangs_below(member, root):
+    parent = member.parent
+    while parent is not None:
+        if parent == root:
+            return True
+        parent = parent.parent
+    return False
+
+
+def _hierarchy_depth(obj):
+    depth = 0
+    while obj.parent is not None:
+        depth += 1
+        obj = obj.parent
+    return depth
+
+
+def _members_to_move(asset):
+    """Members whose world matrix has to be set by hand: the root itself and
+    the members that do not hang below it (children of the root follow it).
+    Parents first: a member parented to another moved member is then re-based
+    against its parent's NEW matrix. Plain list order once re-based Hair
+    (child) before Head (parent), and Hair ended up moved twice, for good."""
+    root = asset['root']
+    members = [member for member in asset['objects']
+               if member == root or not _hangs_below(member, root)]
+    return sorted(members, key=_hierarchy_depth)
+
+
+@contextlib.contextmanager
+def _moved_members(asset, transform):
+    """Apply `transform(matrix_world)` to the members that need it, restore
+    every touched matrix on the way out (also when an assignment fails)."""
+    moved = []
+    try:
+        for member in _members_to_move(asset):
+            original_matrix = member.matrix_world.copy()
+            moved.append((member, original_matrix))
+            member.matrix_world = transform(original_matrix)
+        bpy.context.view_layer.update()
+        yield
+    finally:
+        for member, original_matrix in moved:
+            member.matrix_world = original_matrix
+        bpy.context.view_layer.update()
+
+
 @contextlib.contextmanager
 def at_world_origin(asset):
     """Temporarily move a static asset group to the world origin (keeps the
@@ -210,19 +257,14 @@ def at_world_origin(asset):
         yield
         return
     delta = root.matrix_world.translation.copy()
-    moved = []
-    for member in asset['objects']:
-        original_matrix = member.matrix_world.copy()
-        moved.append((member, original_matrix))
-        new_matrix = original_matrix.copy()
-        new_matrix.translation = original_matrix.translation - delta
-        member.matrix_world = new_matrix
-    bpy.context.view_layer.update()
-    try:
+
+    def shifted(matrix):
+        new_matrix = matrix.copy()
+        new_matrix.translation = matrix.translation - delta
+        return new_matrix
+
+    with _moved_members(asset, shifted):
         yield
-    finally:
-        for member, original_matrix in moved:
-            member.matrix_world = original_matrix
 
 
 @contextlib.contextmanager
@@ -237,17 +279,8 @@ def at_neutral_root(asset):
         yield
         return
     root_inverse = root.matrix_world.inverted_safe()
-    moved = []
-    for member in asset['objects']:
-        original_matrix = member.matrix_world.copy()
-        moved.append((member, original_matrix))
-        member.matrix_world = root_inverse @ original_matrix
-    bpy.context.view_layer.update()
-    try:
+    with _moved_members(asset, lambda matrix: root_inverse @ matrix):
         yield
-    finally:
-        for member, original_matrix in moved:
-            member.matrix_world = original_matrix
 
 
 # ============================================================================
