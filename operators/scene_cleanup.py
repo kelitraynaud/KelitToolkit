@@ -328,7 +328,9 @@ class OBJECT_OT_remove_empty_parents(bpy.types.Operator):
     def execute(self, context):
         # Determine which objects to process
         if self.process_all:
-            empty_objects = [obj for obj in bpy.data.objects if obj.type == 'EMPTY']
+            # current scene only, as the option says (bpy.data.objects would
+            # reach into every scene of the file)
+            empty_objects = [obj for obj in context.scene.objects if obj.type == 'EMPTY']
         else:
             empty_objects = [obj for obj in context.selected_objects if obj.type == 'EMPTY']
 
