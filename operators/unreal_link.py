@@ -29,20 +29,31 @@ def run_unreal_python(commands):
     :param list commands: python statements to execute in Unreal.
     :return tuple: (success, message)
     """
-    no_editor = ("No running Unreal Editor found. Open your UE project and enable "
-                 "'Python Editor Script Plugin' with remote execution")
     try:
         from . import ue_remote
     except Exception:
-        return False, "Could not load the Unreal remote-execution transport"
+        return False, ("Add-on files incomplete (dependencies/remote_execution.py "
+                       "missing): reinstall the add-on")
 
     try:
         output = ue_remote.run_commands(commands)
         return True, str(output or '').strip()
     except ConnectionError:
-        return False, no_editor
+        return False, NO_EDITOR_MESSAGE
     except Exception as error:
         return False, f"Remote execution failed: {error}"
+
+
+NO_EDITOR_MESSAGE = ("No running Unreal Editor found. Open your UE project and enable "
+                     "'Python Editor Script Plugin' with remote execution")
+
+
+def is_no_editor_error(message):
+    """True when a run_unreal_python failure means 'no editor answered': the
+    only case the Connection Doctor can help with. An editor that answered
+    but failed the command, or a broken transport, is not a project-setup
+    problem, and the Doctor would only show three green checks."""
+    return str(message or '').startswith(NO_EDITOR_MESSAGE[:30])
 
 
 # ============================================================================
@@ -151,9 +162,11 @@ def read_project_setup(project_dir):
             data = json.load(handle)
     except Exception as read_error:
         return None, f"Could not read {os.path.basename(uproject_path)}: {read_error}"
+    if not isinstance(data, dict):
+        return None, f"{os.path.basename(uproject_path)} is not a JSON object"
 
     plugins = {entry.get('Name'): bool(entry.get('Enabled'))
-               for entry in data.get('Plugins', [])}
+               for entry in data.get('Plugins', []) if isinstance(entry, dict)}
     state = {
         'uproject': uproject_path,
         'ini': os.path.join(project_dir, 'Config', 'DefaultEngine.ini'),
@@ -183,55 +196,69 @@ def fix_project_setup(project_dir):
         return [], error
 
     fixed = []
+    try:
+        # 1) plugins in the .uproject
+        if not (state['python_plugin'] and state['usd_plugin']):
+            path = state['uproject']
+            with open(path, 'r', encoding='utf-8-sig') as handle:
+                data = json.load(handle)
+            plugins = data.setdefault('Plugins', [])
+            pending = []
+            for name in ('PythonScriptPlugin', 'USDImporter'):
+                entry = next((p for p in plugins
+                              if isinstance(p, dict) and p.get('Name') == name), None)
+                if entry is None:
+                    plugins.append({'Name': name, 'Enabled': True})
+                    pending.append(name)
+                elif not entry.get('Enabled'):
+                    entry['Enabled'] = True
+                    pending.append(name)
+            if pending:
+                shutil.copy2(path, path + '.bak')
+                with open(path, 'w', encoding='utf-8') as handle:
+                    # ensure_ascii=False keeps accented project names readable
+                    # instead of turning them into escape sequences
+                    json.dump(data, handle, indent='\t', ensure_ascii=False)
+                    handle.write('\n')
+                # counted only once the file is really written
+                fixed.extend(pending)
 
-    # 1) plugins in the .uproject
-    if not (state['python_plugin'] and state['usd_plugin']):
-        path = state['uproject']
-        with open(path, 'r', encoding='utf-8-sig') as handle:
-            data = json.load(handle)
-        plugins = data.setdefault('Plugins', [])
-        for name in ('PythonScriptPlugin', 'USDImporter'):
-            entry = next((p for p in plugins if p.get('Name') == name), None)
-            if entry is None:
-                plugins.append({'Name': name, 'Enabled': True})
-                fixed.append(name)
-            elif not entry.get('Enabled'):
-                entry['Enabled'] = True
-                fixed.append(name)
-        if fixed:
-            shutil.copy2(path, path + '.bak')
-            with open(path, 'w', encoding='utf-8') as handle:
-                json.dump(data, handle, indent='\t')
-                handle.write('\n')
-
-    # 2) remote execution in DefaultEngine.ini
-    if not state['remote_execution']:
-        ini_path = state['ini']
-        line = 'bRemoteExecution=True'
-        if os.path.isfile(ini_path):
-            with open(ini_path, 'r', encoding='utf-8-sig', errors='replace') as handle:
-                content = handle.read()
-            shutil.copy2(ini_path, ini_path + '.bak')
-            key_pattern = re.compile(r'^\s*bRemoteExecution\s*=\s*\S+\s*$',
-                                     re.IGNORECASE | re.MULTILINE)
-            if key_pattern.search(content):
-                content = key_pattern.sub(line, content, count=1)
-            else:
-                section_pattern = re.compile(
-                    re.escape(PYTHON_SETTINGS_SECTION) + r'\s*$', re.MULTILINE)
-                section_match = section_pattern.search(content)
-                if section_match:
-                    insert_at = section_match.end()
-                    content = content[:insert_at] + '\n' + line + content[insert_at:]
+        # 2) remote execution in DefaultEngine.ini
+        if not state['remote_execution']:
+            ini_path = state['ini']
+            line = 'bRemoteExecution=True'
+            if os.path.isfile(ini_path):
+                with open(ini_path, 'r', encoding='utf-8-sig', errors='replace') as handle:
+                    content = handle.read()
+                shutil.copy2(ini_path, ini_path + '.bak')
+                key_pattern = re.compile(r'^\s*bRemoteExecution\s*=\s*\S+[ \t]*$',
+                                         re.IGNORECASE | re.MULTILINE)
+                if key_pattern.search(content):
+                    content = key_pattern.sub(line, content, count=1)
                 else:
-                    content = (content.rstrip('\n')
-                               + f'\n\n{PYTHON_SETTINGS_SECTION}\n{line}\n')
-        else:
-            os.makedirs(os.path.dirname(ini_path), exist_ok=True)
-            content = f'{PYTHON_SETTINGS_SECTION}\n{line}\n'
-        with open(ini_path, 'w', encoding='utf-8') as handle:
-            handle.write(content)
-        fixed.append('Remote Execution')
+                    section_pattern = re.compile(
+                        re.escape(PYTHON_SETTINGS_SECTION) + r'[ \t]*$', re.MULTILINE)
+                    section_match = section_pattern.search(content)
+                    if section_match:
+                        insert_at = section_match.end()
+                        content = content[:insert_at] + '\n' + line + content[insert_at:]
+                    else:
+                        content = (content.rstrip('\n')
+                                   + f'\n\n{PYTHON_SETTINGS_SECTION}\n{line}\n')
+            else:
+                os.makedirs(os.path.dirname(ini_path), exist_ok=True)
+                content = f'{PYTHON_SETTINGS_SECTION}\n{line}\n'
+            with open(ini_path, 'w', encoding='utf-8') as handle:
+                handle.write(content)
+            fixed.append('Remote Execution')
+    except OSError as write_error:
+        # read-only files are the norm in source-controlled UE projects
+        # (Perforce): report instead of raising a traceback at the user
+        target = os.path.basename(str(write_error.filename or '')) or 'the project files'
+        done = f" Already fixed before the error: {', '.join(fixed)}." if fixed else ''
+        return fixed, (f"Could not write {target}: {write_error.strerror or write_error}. "
+                       f"Check that the file is not read-only or locked by source "
+                       f"control, then retry.{done}")
 
     return fixed, None
 
@@ -347,7 +374,9 @@ class UNREAL_OT_test_connection(bpy.types.Operator):
 
         self.report({'WARNING'}, message)
         # open the doctor so the user sees WHY and can fix the project files
-        bpy.ops.unreal_toolkit.connection_doctor('INVOKE_DEFAULT')
+        # (only when no editor answered: that is what it diagnoses)
+        if is_no_editor_error(message):
+            bpy.ops.unreal_toolkit.connection_doctor('INVOKE_DEFAULT')
         return {'CANCELLED'}
 
 
