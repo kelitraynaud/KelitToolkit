@@ -6,7 +6,10 @@ from ..utils import normalize_name_for_unreal, clean_name, is_editable
 
 def to_snake_case_keeping_prefix(name):
     """PascalCase -> Snake_Case with the UE prefix kept intact:
-    SM_MyChair -> SM_My_Chair (the old regex produced S_M__My_Chair)."""
+    SM_MyChair -> SM_My_Chair (the old regex produced S_M__My_Chair).
+    Runs of capitals stay whole, so SM_Chair_LOD2 keeps its LOD tag (the
+    previous rule turned it into SM_Chair_L_O_D2, unreadable by Unreal) and
+    HDRICapture becomes HDRI_Capture."""
     prefix = ''
     for candidate in ('UCX_', 'UBX_', 'USP_', 'UCP_', 'SM_', 'SK_', 'MI_',
                       'CAM_', 'COL_', 'AM_', 'BP_', 'M_', 'T_', 'A_', 'P_',
@@ -15,7 +18,8 @@ def to_snake_case_keeping_prefix(name):
             prefix = candidate
             name = name[len(candidate):]
             break
-    converted = re.sub(r'(?<!^)(?<!_)([A-Z])', r'_\1', name)
+    converted = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', name)
+    converted = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', converted)
     return prefix + converted
 
 
@@ -201,7 +205,7 @@ class OBJECT_OT_normalize_names_advanced(bpy.types.Operator):
                 if self.case_style == 'SNAKE':
                     new_name = to_snake_case_keeping_prefix(new_name)
 
-                if new_name != old_name:
+                if new_name != old_name and is_editable(obj):
                     obj.name = new_name
                     renamed_objects += 1
 
@@ -340,7 +344,7 @@ class OBJECT_OT_batch_find_replace(bpy.types.Operator):
                         pattern = re.compile(re.escape(self.find_text), re.IGNORECASE)
                         new_name = pattern.sub(self.replace_text, old_name)
 
-                if new_name != old_name:
+                if new_name != old_name and is_editable(obj):
                     obj.name = new_name
                     renamed_count += 1
 
