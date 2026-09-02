@@ -32,16 +32,20 @@ bl_info = {
 
 import bpy
 
-# Support Blender's "Reload Scripts": re-import submodules already in memory
+# Support Blender's "Reload Scripts": reload EVERY submodule already in memory
+# (reloading the three packages alone left their submodules stale). Leaves
+# first, utils and the vendored transport before the modules importing them.
 if "settings" in locals():
     import importlib
-    settings = importlib.reload(settings)
-    operators = importlib.reload(operators)
-    ui = importlib.reload(ui)
-else:
-    from . import settings
-    from . import operators
-    from . import ui
+    import sys
+    _prefix = __name__ + '.'
+    _leaves = (_prefix + 'utils', _prefix + 'dependencies')
+    for _name in sorted((name for name in sys.modules if name.startswith(_prefix)),
+                        key=lambda name: (not name.startswith(_leaves), -name.count('.'))):
+        importlib.reload(sys.modules[_name])
+from . import settings
+from . import operators
+from . import ui
 
 # For keyboard shortcuts
 addon_keymaps = []
