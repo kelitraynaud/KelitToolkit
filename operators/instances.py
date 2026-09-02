@@ -525,7 +525,7 @@ class OBJECT_OT_apply_all_modifiers(bpy.types.Operator):
 
             # applying on multi-user mesh data fails for EVERY modifier -
             # skip the object whole instead of failing one by one
-            if obj.data and obj.data.users > 1:
+            if obj.data and obj.data.users - int(obj.data.use_fake_user) > 1:
                 self.report({'WARNING'},
                             f"{obj.name}: shared mesh data ({obj.data.users} users) - "
                             "make it single-user first (or use Realize Modifiers)")
