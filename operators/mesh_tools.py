@@ -11,7 +11,7 @@ from ..utils import clean_name
 
 class OBJECT_OT_enhance_low_poly(bpy.types.Operator):
     """Improve low-poly object rendering with subdivision and bevel"""
-    bl_idname = "object.enhance_low_poly"
+    bl_idname = "kelit_toolkit.enhance_low_poly"
     bl_label = "Enhance Low Poly"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -93,7 +93,7 @@ class OBJECT_OT_enhance_low_poly(bpy.types.Operator):
 
 class OBJECT_OT_create_collision_mesh(bpy.types.Operator):
     """Create simplified collision mesh for Unreal (UCX_, UBX_, USP_)"""
-    bl_idname = "object.create_collision_mesh"
+    bl_idname = "kelit_toolkit.create_collision_mesh"
     bl_label = "Create Collision Mesh"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -212,7 +212,7 @@ class OBJECT_OT_create_collision_mesh(bpy.types.Operator):
 
 class OBJECT_OT_generate_lods(bpy.types.Operator):
     """Automatically generate LODs for selected objects"""
-    bl_idname = "object.generate_lods"
+    bl_idname = "kelit_toolkit.generate_lods"
     bl_label = "Generate LODs"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -285,7 +285,7 @@ class OBJECT_OT_convert_to_low_poly(bpy.types.Operator):
     """Create a low-poly copy of each selected object and bake the high-poly
     surface detail onto it (tangent normal + AO, optionally base color).
     The original is kept, hidden. Bakes run in Cycles and can take a while"""
-    bl_idname = "object.convert_to_low_poly"
+    bl_idname = "kelit_toolkit.convert_to_low_poly"
     bl_label = "High to Low Poly (Bake Details)"
     bl_options = {'REGISTER', 'UNDO'}
 

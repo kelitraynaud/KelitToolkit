@@ -81,7 +81,7 @@ class PREFERENCES_OT_setup_update_repo(bpy.types.Operator):
     versions show up natively in Preferences > Get Extensions. If you then
     install the toolkit from that repository, remove this zip-installed copy
     to avoid running two versions at once"""
-    bl_idname = "unreal_toolkit.setup_update_repo"
+    bl_idname = "kelit_toolkit.setup_update_repo"
     bl_label = "Enable Native Updates"
     bl_options = {'REGISTER'}
 
@@ -175,11 +175,11 @@ def register():
     bpy.utils.register_class(UnrealToolkitSettings)
     bpy.utils.register_class(PREFERENCES_OT_setup_update_repo)
     bpy.utils.register_class(KelitToolkitPreferences)
-    bpy.types.Scene.unreal_toolkit_settings = bpy.props.PointerProperty(type=UnrealToolkitSettings)
+    bpy.types.Scene.kelit_toolkit_settings = bpy.props.PointerProperty(type=UnrealToolkitSettings)
 
 
 def unregister():
-    del bpy.types.Scene.unreal_toolkit_settings
+    del bpy.types.Scene.kelit_toolkit_settings
     bpy.utils.unregister_class(KelitToolkitPreferences)
     bpy.utils.unregister_class(PREFERENCES_OT_setup_update_repo)
     bpy.utils.unregister_class(UnrealToolkitSettings)

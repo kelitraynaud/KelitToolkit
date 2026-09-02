@@ -2160,7 +2160,7 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
     attachments. Standalone: needs only UE's USD Importer plugin and Python
     remote execution enabled. Note: re-syncing rebuilds the LevelSequence
     from scratch - tracks added to it by hand are cleared"""
-    bl_idname = "unreal_toolkit.usd_scene_sync"
+    bl_idname = "kelit_toolkit.usd_scene_sync"
     bl_label = "Send Scene via USD"
     bl_options = {'REGISTER'}
 
@@ -2313,7 +2313,7 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
     )
 
     def invoke(self, context, event):
-        settings = context.scene.unreal_toolkit_settings
+        settings = context.scene.kelit_toolkit_settings
         if settings.sync_options_saved:
             for name in self.REMEMBERED_OPTIONS:
                 stored = getattr(settings, f'sync_{name}', None)
@@ -2325,7 +2325,7 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         return context.window_manager.invoke_props_dialog(self, width=400)
 
     def _remember_options(self, context):
-        settings = context.scene.unreal_toolkit_settings
+        settings = context.scene.kelit_toolkit_settings
         for name in self.REMEMBERED_OPTIONS:
             setattr(settings, f'sync_{name}', getattr(self, name))
         settings.sync_options_saved = True
@@ -2407,7 +2407,7 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
             self.report({'WARNING'}, "No mesh objects to send")
             return {'CANCELLED'}
 
-        settings = context.scene.unreal_toolkit_settings
+        settings = context.scene.kelit_toolkit_settings
         scene_name = get_scene_name()
         staging_dir = get_staging_dir()
         # binary .usd (crate): much smaller/faster than ASCII for heavy meshes
@@ -2550,14 +2550,14 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
             # (only when no editor answered, the case it diagnoses)
             from .unreal_link import is_no_editor_error
             if is_no_editor_error(output):
-                bpy.ops.unreal_toolkit.connection_doctor('INVOKE_DEFAULT')
+                bpy.ops.kelit_toolkit.connection_doctor('INVOKE_DEFAULT')
             return {'CANCELLED'}
 
         result, error = parse_sync_result(output)
         if error and 'USD Importer' in error:
             self.report({'ERROR'}, "The USD Importer plugin is not enabled in this "
                                    "Unreal project")
-            bpy.ops.unreal_toolkit.connection_doctor('INVOKE_DEFAULT')
+            bpy.ops.kelit_toolkit.connection_doctor('INVOKE_DEFAULT')
             return {'CANCELLED'}
         if error and 'unreadable' in error:
             # the run completed - only its report line failed to parse
@@ -2859,7 +2859,7 @@ class UNREAL_OT_usd_make_spawnable(bpy.types.Operator):
     hierarchy survives: level attachments are replayed as Attach Tracks,
     and static objects join the sequence with their level transform.
     Run this after 'Send Scene via USD' (and after building materials)"""
-    bl_idname = "unreal_toolkit.usd_make_spawnable"
+    bl_idname = "kelit_toolkit.usd_make_spawnable"
     bl_label = "Make Sequence Self-Contained"
     bl_options = {'REGISTER'}
 
@@ -2881,7 +2881,7 @@ class UNREAL_OT_usd_make_spawnable(bpy.types.Operator):
         box.label(text="no level dependency, no broken bindings")
 
     def execute(self, context):
-        settings = context.scene.unreal_toolkit_settings
+        settings = context.scene.kelit_toolkit_settings
         scene = context.scene
         scene_name = get_scene_name()
         content_root = (settings.usd_content_folder or '/Game/BlenderSync').rstrip('/')
@@ -2941,7 +2941,7 @@ class UNREAL_OT_usd_make_spawnable(bpy.types.Operator):
 class UNREAL_OT_usd_clear_synced(bpy.types.Operator):
     """Delete ALL actors previously synced from this .blend file in the
     Unreal level (assets in the Content Browser are kept)"""
-    bl_idname = "unreal_toolkit.usd_clear_synced"
+    bl_idname = "kelit_toolkit.usd_clear_synced"
     bl_label = "Clear All Synced Actors"
     bl_options = {'REGISTER'}
 
@@ -2979,7 +2979,7 @@ class UNREAL_OT_usd_clear_synced(bpy.types.Operator):
 class UNREAL_OT_usd_export_hierarchy(bpy.types.Operator):
     """Export the selection (with its full hierarchy) to a kind-tagged .usda
     file, ready for a manual 'Import Into Level' in Unreal"""
-    bl_idname = "unreal_toolkit.usd_export_hierarchy"
+    bl_idname = "kelit_toolkit.usd_export_hierarchy"
     bl_label = "Export USD File (Hierarchy)"
     bl_options = {'REGISTER'}
 

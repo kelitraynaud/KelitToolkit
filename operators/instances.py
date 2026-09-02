@@ -7,7 +7,7 @@ from ..utils import clean_name
 
 class OBJECT_OT_replace_with_active_instance(bpy.types.Operator):
     """Replace selected objects with instances of the active object"""
-    bl_idname = "object.replace_with_active_instance"
+    bl_idname = "kelit_toolkit.replace_with_active_instance"
     bl_label = "Replace With Active Instance"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -86,7 +86,7 @@ class OBJECT_OT_replace_with_active_instance(bpy.types.Operator):
 
 class OBJECT_OT_group_similar_in_collection(bpy.types.Operator):
     """Group all objects with the same mesh as selected object into a sub-collection"""
-    bl_idname = "object.group_similar_in_collection"
+    bl_idname = "kelit_toolkit.group_similar_in_collection"
     bl_label = "Group Similar in Collection"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -138,7 +138,7 @@ class OBJECT_OT_group_similar_in_collection(bpy.types.Operator):
 
 class OBJECT_OT_detect_and_replace_instances(bpy.types.Operator):
     """Detect duplicate meshes and replace them with instances for optimization"""
-    bl_idname = "object.detect_and_replace_instances"
+    bl_idname = "kelit_toolkit.detect_and_replace_instances"
     bl_label = "Detect Duplicates & Replace to Instances"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -374,7 +374,7 @@ class OBJECT_OT_detect_and_replace_instances(bpy.types.Operator):
 
 class OBJECT_OT_realize_modifiers_to_instances(bpy.types.Operator):
     """Convert modifiers (Array, Mirror, etc.) to individual mesh instances respecting stack order"""
-    bl_idname = "object.realize_modifiers_to_instances"
+    bl_idname = "kelit_toolkit.realize_modifiers_to_instances"
     bl_label = "Realize Modifiers to Instances"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -500,7 +500,7 @@ class OBJECT_OT_realize_modifiers_to_instances(bpy.types.Operator):
 
 class OBJECT_OT_apply_all_modifiers(bpy.types.Operator):
     """Apply all modifiers on selected objects"""
-    bl_idname = "object.apply_all_modifiers"
+    bl_idname = "kelit_toolkit.apply_all_modifiers"
     bl_label = "Apply All Modifiers"
     bl_options = {'REGISTER', 'UNDO'}
 

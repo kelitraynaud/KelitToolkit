@@ -7,7 +7,7 @@ import bpy
 
 class OBJECT_OT_auto_setup_pbr_textures(bpy.types.Operator):
     """Detect and automatically configure PBR textures from a folder"""
-    bl_idname = "object.auto_setup_pbr_textures"
+    bl_idname = "kelit_toolkit.auto_setup_pbr_textures"
     bl_label = "Auto Setup PBR Textures"
     bl_options = {'REGISTER', 'UNDO'}
 

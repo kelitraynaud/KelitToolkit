@@ -8,7 +8,7 @@ from ..utils import clean_name
 
 class OBJECT_OT_create_material_by_mesh(bpy.types.Operator):
     """Create a unique material for each selected mesh"""
-    bl_idname = "object.create_material_by_mesh"
+    bl_idname = "kelit_toolkit.create_material_by_mesh"
     bl_label = "Create Material By Mesh"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -59,7 +59,7 @@ class OBJECT_OT_create_material_by_mesh(bpy.types.Operator):
 
 class OBJECT_OT_delete_unused_materials(bpy.types.Operator):
     """Delete unused material slots on selected objects"""
-    bl_idname = "object.delete_unused_materials"
+    bl_idname = "kelit_toolkit.delete_unused_materials"
     bl_label = "Delete Unused Materials"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -98,7 +98,7 @@ class OBJECT_OT_delete_unused_materials(bpy.types.Operator):
 
 class OBJECT_OT_purge_unused_materials(bpy.types.Operator):
     """Delete all unused materials from the Blender project"""
-    bl_idname = "object.purge_unused_materials"
+    bl_idname = "kelit_toolkit.purge_unused_materials"
     bl_label = "Purge Unused Materials"
     bl_options = {'REGISTER', 'UNDO'}
 

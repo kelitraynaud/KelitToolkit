@@ -9,7 +9,7 @@ import bpy
 
 class OBJECT_OT_delete_hidden_objects(bpy.types.Operator):
     """Delete hidden or viewport-disabled objects from the CURRENT scene"""
-    bl_idname = "object.delete_hidden_objects"
+    bl_idname = "kelit_toolkit.delete_hidden_objects"
     bl_label = "Delete Hidden Objects"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -46,7 +46,7 @@ class OBJECT_OT_delete_hidden_objects(bpy.types.Operator):
 
 class OBJECT_OT_remove_empty_collections(bpy.types.Operator):
     """Remove all empty collections from the scene"""
-    bl_idname = "object.remove_empty_collections"
+    bl_idname = "kelit_toolkit.remove_empty_collections"
     bl_label = "Remove Empty Collections"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -91,7 +91,7 @@ class OBJECT_OT_remove_empty_collections(bpy.types.Operator):
 
 class OBJECT_OT_purge_zero_face_meshes(bpy.types.Operator):
     """Remove mesh objects that have no faces/polygons"""
-    bl_idname = "object.purge_zero_face_meshes"
+    bl_idname = "kelit_toolkit.purge_zero_face_meshes"
     bl_label = "Purge Zero-Face Meshes"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -117,7 +117,7 @@ class OBJECT_OT_purge_zero_face_meshes(bpy.types.Operator):
 
 class OBJECT_OT_clean_vertex_groups(bpy.types.Operator):
     """Remove unused vertex groups from selected mesh objects"""
-    bl_idname = "object.clean_vertex_groups"
+    bl_idname = "kelit_toolkit.clean_vertex_groups"
     bl_label = "Clean Vertex Groups"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -169,7 +169,7 @@ class OBJECT_OT_delete_unused_empties(bpy.types.Operator):
     camera rig or an animation still needs (parents of cameras, constraint
     and DOF targets, animated parents). Children are re-parented with their
     world transform preserved"""
-    bl_idname = "object.delete_unused_empties"
+    bl_idname = "kelit_toolkit.delete_unused_empties"
     bl_label = "Delete Unused Empties"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -309,7 +309,7 @@ class OBJECT_OT_delete_unused_empties(bpy.types.Operator):
 
 class OBJECT_OT_remove_empty_parents(bpy.types.Operator):
     """Remove Empty objects and keep only mesh children with proper transforms (perfect for Sketchfab imports)"""
-    bl_idname = "object.remove_empty_parents"
+    bl_idname = "kelit_toolkit.remove_empty_parents"
     bl_label = "Remove Empty Parents"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -399,7 +399,7 @@ class OBJECT_OT_remove_empty_parents(bpy.types.Operator):
 
 class OBJECT_OT_remove_unused_mesh_data(bpy.types.Operator):
     """Remove orphaned mesh data blocks with zero users"""
-    bl_idname = "object.remove_unused_mesh_data"
+    bl_idname = "kelit_toolkit.remove_unused_mesh_data"
     bl_label = "Remove Unused Mesh Data"
     bl_options = {'REGISTER', 'UNDO'}
 

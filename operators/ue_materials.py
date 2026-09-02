@@ -378,7 +378,7 @@ class UNREAL_OT_build_material_instances(bpy.types.Operator):
     """Rebuild the Blender materials as Unreal material instances under a
     single readable master, and assign them to the synced meshes.
     Run this after 'Send Scene via USD'"""
-    bl_idname = "unreal_toolkit.build_material_instances"
+    bl_idname = "kelit_toolkit.build_material_instances"
     bl_label = "Build Material Instances"
     bl_options = {'REGISTER'}
 
@@ -410,7 +410,7 @@ class UNREAL_OT_build_material_instances(bpy.types.Operator):
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "source")
-        settings = context.scene.unreal_toolkit_settings
+        settings = context.scene.kelit_toolkit_settings
         layout.prop(settings, "ue_master_material")
 
         materials = collect_materials(self._resolve_objects(context))
@@ -426,7 +426,7 @@ class UNREAL_OT_build_material_instances(bpy.types.Operator):
             self.report({'WARNING'}, "No materials found on those objects")
             return {'CANCELLED'}
 
-        settings = context.scene.unreal_toolkit_settings
+        settings = context.scene.kelit_toolkit_settings
         content_root = (settings.usd_content_folder or '/Game/BlenderSync').rstrip('/')
         scene_name = get_scene_name()
         scene_folder = f'{content_root}/{scene_name}'

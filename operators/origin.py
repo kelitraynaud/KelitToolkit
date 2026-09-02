@@ -8,7 +8,7 @@ from ..utils import offset_mesh_geometry
 
 class OBJECT_OT_set_origin_preset(bpy.types.Operator):
     """Set origin to preset position for selected objects"""
-    bl_idname = "object.set_origin_preset"
+    bl_idname = "kelit_toolkit.set_origin_preset"
     bl_label = "Set Origin Preset"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -130,7 +130,7 @@ class OBJECT_OT_set_origin_preset(bpy.types.Operator):
 
 class OBJECT_OT_set_origin_custom(bpy.types.Operator):
     """Set origin to custom position using percentage sliders"""
-    bl_idname = "object.set_origin_custom"
+    bl_idname = "kelit_toolkit.set_origin_custom"
     bl_label = "Set Origin Custom"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -271,7 +271,7 @@ class OBJECT_OT_set_origin_custom(bpy.types.Operator):
 
 class OBJECT_OT_set_origin_with_modifier_compensation(bpy.types.Operator):
     """Set origin position while compensating Array/Mirror modifier offsets to keep visual result identical"""
-    bl_idname = "object.set_origin_with_modifier_compensation"
+    bl_idname = "kelit_toolkit.set_origin_with_modifier_compensation"
     bl_label = "Set Origin (Compensate Modifiers)"
     bl_options = {'REGISTER', 'UNDO'}
 

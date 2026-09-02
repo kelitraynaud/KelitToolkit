@@ -82,7 +82,7 @@ def collect_validation_issues(objects):
 
 class OBJECT_OT_validate_for_unreal(bpy.types.Operator):
     """Validate selected objects for export to Unreal"""
-    bl_idname = "object.validate_for_unreal"
+    bl_idname = "kelit_toolkit.validate_for_unreal"
     bl_label = "Validate for Unreal"
     bl_options = {'REGISTER'}
 
@@ -125,7 +125,7 @@ class OBJECT_OT_validate_for_unreal(bpy.types.Operator):
 
 class OBJECT_OT_apply_scale_instances(bpy.types.Operator):
     """Apply scale on shared mesh data and all their instances"""
-    bl_idname = "object.apply_scale_instances"
+    bl_idname = "kelit_toolkit.apply_scale_instances"
     bl_label = "Apply Scale (Instances Safe)"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -190,7 +190,7 @@ class OBJECT_OT_apply_scale_instances(bpy.types.Operator):
 
 class OBJECT_OT_apply_rotation_instances(bpy.types.Operator):
     """Apply rotation on shared mesh data and all their instances"""
-    bl_idname = "object.apply_rotation_instances"
+    bl_idname = "kelit_toolkit.apply_rotation_instances"
     bl_label = "Apply Rotation (Instances Safe)"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -268,7 +268,7 @@ class OBJECT_OT_normalize_scene_scale(bpy.types.Operator):
     """Rescale the whole scene (objects AND cameras) by one factor around the
     world origin, so mis-scaled imports reach scale 1.0 at real-world size
     while every camera keeps exactly the same framing"""
-    bl_idname = "object.normalize_scene_scale"
+    bl_idname = "kelit_toolkit.normalize_scene_scale"
     bl_label = "Normalize Scene Scale"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -441,7 +441,7 @@ class OBJECT_OT_bake_camera_animation(bpy.types.Operator):
     """Bake the camera's FINAL world animation onto the camera itself, then
     drop its parents and constraints. The camera moves identically but no
     longer needs any null/target - they can then be cleaned away"""
-    bl_idname = "object.bake_camera_animation"
+    bl_idname = "kelit_toolkit.bake_camera_animation"
     bl_label = "Bake Camera Animation"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -556,7 +556,7 @@ class OBJECT_OT_bake_camera_animation(bpy.types.Operator):
 
 class OBJECT_OT_apply_all_transforms(bpy.types.Operator):
     """Apply all transformations on selected objects"""
-    bl_idname = "object.apply_all_transforms"
+    bl_idname = "kelit_toolkit.apply_all_transforms"
     bl_label = "Apply All Transforms"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -653,7 +653,7 @@ def find_companion_objects(obj, candidates):
 
 class OBJECT_OT_batch_fbx_export(bpy.types.Operator):
     """Export each selected object as individual FBX (with its collisions and LODs)"""
-    bl_idname = "object.batch_fbx_export"
+    bl_idname = "kelit_toolkit.batch_fbx_export"
     bl_label = "Batch FBX Export"
     bl_options = {'REGISTER'}
 

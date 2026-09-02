@@ -70,14 +70,14 @@ def register():
 
         # Alt+Shift+R : Replace With Active Instance
         kmi = km.keymap_items.new(
-            "object.replace_with_active_instance",
+            "kelit_toolkit.replace_with_active_instance",
             type='R', value='PRESS', alt=True, shift=True
         )
         addon_keymaps.append((km, kmi))
 
         # Alt+Shift+N : Normalize Names (Quick)
         kmi = km.keymap_items.new(
-            "object.normalize_names_quick",
+            "kelit_toolkit.normalize_names_quick",
             type='N', value='PRESS', alt=True, shift=True
         )
         addon_keymaps.append((km, kmi))

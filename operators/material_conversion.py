@@ -10,7 +10,7 @@ import os
 
 class OBJECT_OT_convert_to_simple_pbr(bpy.types.Operator):
     """Convert complex node trees to simple PBR setup (Base Color, Metallic, Roughness, Normal)"""
-    bl_idname = "object.convert_to_simple_pbr"
+    bl_idname = "kelit_toolkit.convert_to_simple_pbr"
     bl_label = "Convert to Simple PBR"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -175,7 +175,7 @@ class OBJECT_OT_convert_to_simple_pbr(bpy.types.Operator):
 
 class OBJECT_OT_detect_unsupported_nodes(bpy.types.Operator):
     """Scan materials and report nodes that won't export properly to Unreal"""
-    bl_idname = "object.detect_unsupported_nodes"
+    bl_idname = "kelit_toolkit.detect_unsupported_nodes"
     bl_label = "Detect Unsupported Nodes"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -229,7 +229,7 @@ class OBJECT_OT_detect_unsupported_nodes(bpy.types.Operator):
 
 class OBJECT_OT_bake_procedural_to_texture(bpy.types.Operator):
     """Bake procedural materials to image textures"""
-    bl_idname = "object.bake_procedural_to_texture"
+    bl_idname = "kelit_toolkit.bake_procedural_to_texture"
     bl_label = "Bake Procedural to Texture"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -310,7 +310,7 @@ class OBJECT_OT_bake_procedural_to_texture(bpy.types.Operator):
 
 class OBJECT_OT_texture_path_validator(bpy.types.Operator):
     """Validate that all texture file paths exist on disk"""
-    bl_idname = "object.texture_path_validator"
+    bl_idname = "kelit_toolkit.texture_path_validator"
     bl_label = "Validate Texture Paths"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -360,7 +360,7 @@ class OBJECT_OT_texture_path_validator(bpy.types.Operator):
 class OBJECT_OT_rename_textures_for_unreal(bpy.types.Operator):
     """Rename texture DATABLOCKS with the Unreal naming convention
     (_BaseColor, _Normal, ...). Files on disk keep their names"""
-    bl_idname = "object.rename_textures_for_unreal"
+    bl_idname = "kelit_toolkit.rename_textures_for_unreal"
     bl_label = "Rename Textures for Unreal"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -436,7 +436,7 @@ class OBJECT_OT_rename_textures_for_unreal(bpy.types.Operator):
 
 class OBJECT_OT_extract_textures_from_nodes(bpy.types.Operator):
     """Extract and save all texture images from material nodes to a folder"""
-    bl_idname = "object.extract_textures_from_nodes"
+    bl_idname = "kelit_toolkit.extract_textures_from_nodes"
     bl_label = "Extract Textures from Nodes"
     bl_options = {'REGISTER', 'UNDO'}
 

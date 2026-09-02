@@ -73,7 +73,7 @@ t.check('no_editor_error_scope',
 
 # ---- remembered sync options ----
 scene = t.fresh_scene()
-scene_settings = scene.unreal_toolkit_settings
+scene_settings = scene.kelit_toolkit_settings
 scene_settings.sync_options_saved = False
 op = usd_sync.UNREAL_OT_usd_scene_sync
 fake = type('FakeOp', (), {name: None for name in op.REMEMBERED_OPTIONS})()
@@ -91,11 +91,11 @@ t.check('options_saved', scene_settings.sync_options_saved
 repos = bpy.context.preferences.extensions.repos
 pre_existing = settings_mod.find_update_repo(bpy.context) is not None
 before = len(repos)
-t.check('update_repo_first_run', list(bpy.ops.unreal_toolkit.setup_update_repo()) == ['FINISHED'])
+t.check('update_repo_first_run', list(bpy.ops.kelit_toolkit.setup_update_repo()) == ['FINISHED'])
 repo = settings_mod.find_update_repo(bpy.context)
 t.check('update_repo_registered', repo is not None
         and repo.remote_url == settings_mod.UPDATE_REPO_URL)
-bpy.ops.unreal_toolkit.setup_update_repo()
+bpy.ops.kelit_toolkit.setup_update_repo()
 t.check('update_repo_idempotent', len(repos) == before + (0 if pre_existing else 1))
 if not pre_existing and repo is not None:
     repos.remove(repo)

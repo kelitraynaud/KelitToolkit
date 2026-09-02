@@ -157,11 +157,11 @@ def search_operators(query):
 
 class UNREAL_OT_clear_panel_search(bpy.types.Operator):
     """Clear the toolkit search and bring the sections back"""
-    bl_idname = "unreal_toolkit.clear_panel_search"
+    bl_idname = "kelit_toolkit.clear_panel_search"
     bl_label = "Clear Search"
 
     def execute(self, context):
-        context.scene.unreal_toolkit_settings.panel_search = ""
+        context.scene.kelit_toolkit_settings.panel_search = ""
         return {'FINISHED'}
 
 
@@ -187,7 +187,7 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        settings = context.scene.unreal_toolkit_settings
+        settings = context.scene.kelit_toolkit_settings
 
         # quick search: type to filter every tool, clear to get sections back
         row = layout.row(align=True)
@@ -255,7 +255,7 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
                      text="Test Unreal Connection", icon='CHECKMARK')
         col.operator(UNREAL_OT_connection_doctor.bl_idname,
                      text="Connection Doctor (Setup Help)", icon='COMMUNITY')
-        col.operator("unreal_toolkit.setup_update_repo",
+        col.operator("kelit_toolkit.setup_update_repo",
                      text="Enable Native Updates", icon='FILE_REFRESH')
         col.operator(UNREAL_OT_usd_clear_synced.bl_idname,
                      text="Clear All Synced Actors", icon='TRASH')

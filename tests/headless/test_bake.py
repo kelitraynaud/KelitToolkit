@@ -34,7 +34,7 @@ t.deselect_all()
 high.select_set(True)
 bpy.context.view_layer.objects.active = high
 
-result = bpy.ops.object.convert_to_low_poly(
+result = bpy.ops.kelit_toolkit.convert_to_low_poly(
     'EXEC_DEFAULT', target_faces=1500, bake_resolution='512',
     bake_normal=True, bake_ao=True, bake_basecolor=True,
     bake_samples=8, keep_original=True)

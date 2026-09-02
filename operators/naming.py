@@ -29,7 +29,7 @@ def to_snake_case_keeping_prefix(name):
 
 class OBJECT_OT_normalize_names_quick(bpy.types.Operator):
     """Quick normalize: PascalCase + Unreal prefixes (one click)"""
-    bl_idname = "object.normalize_names_quick"
+    bl_idname = "kelit_toolkit.normalize_names_quick"
     bl_label = "Normalize Names (Quick)"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -97,7 +97,7 @@ class OBJECT_OT_normalize_names_quick(bpy.types.Operator):
 
 class OBJECT_OT_normalize_names_advanced(bpy.types.Operator):
     """Advanced normalize with custom options"""
-    bl_idname = "object.normalize_names_advanced"
+    bl_idname = "kelit_toolkit.normalize_names_advanced"
     bl_label = "Normalize Names (Advanced)"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -246,7 +246,7 @@ class OBJECT_OT_normalize_names_advanced(bpy.types.Operator):
 
 class OBJECT_OT_batch_find_replace(bpy.types.Operator):
     """Find and replace text in object names"""
-    bl_idname = "object.batch_find_replace"
+    bl_idname = "kelit_toolkit.batch_find_replace"
     bl_label = "Batch Find & Replace"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -372,7 +372,7 @@ class OBJECT_OT_batch_find_replace(bpy.types.Operator):
 
 class OBJECT_OT_set_mesh_name_from_object(bpy.types.Operator):
     """Rename objects and mesh data (adds SM_ if missing)"""
-    bl_idname = "object.set_mesh_name_from_object"
+    bl_idname = "kelit_toolkit.set_mesh_name_from_object"
     bl_label = "Set Mesh Name From Object"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -417,7 +417,7 @@ class OBJECT_OT_set_mesh_name_from_object(bpy.types.Operator):
 
 class OBJECT_OT_set_object_name_from_mesh(bpy.types.Operator):
     """Rename all selected objects with their mesh data name (creates uniform naming)"""
-    bl_idname = "object.set_object_name_from_mesh"
+    bl_idname = "kelit_toolkit.set_object_name_from_mesh"
     bl_label = "Set Object Name From Mesh"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -462,7 +462,7 @@ class OBJECT_OT_set_object_name_from_mesh(bpy.types.Operator):
 
 class OBJECT_OT_add_prefix_to_selected(bpy.types.Operator):
     """Add a prefix to selected objects"""
-    bl_idname = "object.add_prefix_to_selected"
+    bl_idname = "kelit_toolkit.add_prefix_to_selected"
     bl_label = "Add Prefix to Selected"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -492,7 +492,7 @@ class OBJECT_OT_add_prefix_to_selected(bpy.types.Operator):
 
 class OBJECT_OT_material_name_from_mesh(bpy.types.Operator):
     """Rename materials based on mesh name (SM_ → M_), keeps shared materials by default"""
-    bl_idname = "object.material_name_from_mesh"
+    bl_idname = "kelit_toolkit.material_name_from_mesh"
     bl_label = "Material Name from Mesh"
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -633,7 +633,7 @@ class OBJECT_OT_material_name_from_mesh(bpy.types.Operator):
 
 class OBJECT_OT_clean_object_names(bpy.types.Operator):
     """Clean object names by removing numerical suffixes (.001, .002, etc.)"""
-    bl_idname = "object.clean_object_names"
+    bl_idname = "kelit_toolkit.clean_object_names"
     bl_label = "Clean Object Names"
     bl_options = {'REGISTER', 'UNDO'}
 

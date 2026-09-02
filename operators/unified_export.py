@@ -378,7 +378,7 @@ class UNREAL_OT_export_assets(bpy.types.Operator):
     """Export the selection as separate Unreal-ready assets - skeletal meshes
     (armature + skinned meshes + animation), static meshes (with collisions
     and LODs) and scene objects - as USD (recommended) or FBX"""
-    bl_idname = "unreal_toolkit.export_assets"
+    bl_idname = "kelit_toolkit.export_assets"
     bl_label = "Export Assets"
     bl_options = {'REGISTER'}
 

@@ -16,23 +16,23 @@ t.fresh_scene()
 
 # selection tools are disabled with nothing selected
 t.check('poll_disabled_empty',
-        bpy.ops.object.normalize_names_quick.poll() is False
-        and bpy.ops.object.validate_for_unreal.poll() is False
-        and bpy.ops.object.set_origin_preset.poll() is False)
+        bpy.ops.kelit_toolkit.normalize_names_quick.poll() is False
+        and bpy.ops.kelit_toolkit.validate_for_unreal.poll() is False
+        and bpy.ops.kelit_toolkit.set_origin_preset.poll() is False)
 
 # naming: normalize is idempotent and strips stacked suffixes
 bpy.ops.mesh.primitive_cube_add()
 cube = bpy.context.active_object
 cube.name = 'test cube.001.002'
-bpy.ops.object.normalize_names_quick()
+bpy.ops.kelit_toolkit.normalize_names_quick()
 first = bpy.data.objects[0].name
-bpy.ops.object.normalize_names_quick()
+bpy.ops.kelit_toolkit.normalize_names_quick()
 t.check('normalize_idempotent', bpy.data.objects[0].name == first == 'SM_TestCube')
 
 # collision: UCX is created, named, and convex-ish (a hull of a cube is a cube)
 bpy.ops.object.select_all(action='SELECT')
 bpy.context.view_layer.objects.active = bpy.data.objects[0]
-bpy.ops.object.create_collision_mesh(collision_type='UCX')
+bpy.ops.kelit_toolkit.create_collision_mesh(collision_type='UCX')
 ucx = [o for o in bpy.data.objects if o.name.startswith('UCX_')]
 t.check('ucx_created', len(ucx) == 1)
 t.check('ucx_convex_hull_of_cube', ucx and len(ucx[0].data.vertices) == 8)
@@ -55,7 +55,7 @@ bpy.context.view_layer.update()
 t.deselect_all()
 mid.select_set(True)
 bpy.context.view_layer.objects.active = mid
-bpy.ops.object.remove_empty_parents(apply_transforms=True)
+bpy.ops.kelit_toolkit.remove_empty_parents(apply_transforms=True)
 bpy.context.view_layer.update()
 t.check('reparent_world_preserved',
         all(abs(a - b) < 1e-4 for a, b in zip(world_before, cube.matrix_world.translation)))
@@ -78,7 +78,7 @@ def world_verts(obj):
 
 
 before = world_verts(cube)
-bpy.ops.object.apply_rotation_instances()
+bpy.ops.kelit_toolkit.apply_rotation_instances()
 bpy.context.view_layer.update()
 after = world_verts(cube)
 t.check('apply_rotation_world_stable',
@@ -90,14 +90,14 @@ t.fresh_scene()
 bpy.ops.mesh.primitive_cube_add()
 cube = bpy.context.active_object
 cube.scale = (2.0, 2.0, 2.0)
-bpy.ops.object.apply_scale_instances()
+bpy.ops.kelit_toolkit.apply_scale_instances()
 t.check('apply_scale_applied', all(abs(v - 1.0) < 1e-6 for v in cube.scale)
         and abs(max(v.co.x for v in cube.data.vertices) - 2.0) < 1e-4)
 cube.scale = (-1.0, 1.0, 1.0)
-bpy.ops.object.apply_scale_instances()
+bpy.ops.kelit_toolkit.apply_scale_instances()
 t.check('apply_scale_refuses_mirror', abs(cube.scale.x + 1.0) < 1e-6)
 cube.scale = (0.0, 1.0, 1.0)
-bpy.ops.object.apply_scale_instances()
+bpy.ops.kelit_toolkit.apply_scale_instances()
 t.check('apply_scale_refuses_zero', abs(cube.scale.x) < 1e-6
         and abs(max(v.co.x for v in cube.data.vertices) - 2.0) < 1e-4)
 
@@ -110,7 +110,7 @@ lamp = bpy.data.objects.new('lamp', bpy.data.lights.new('lamp', 'POINT'))
 bpy.context.collection.objects.link(lamp)
 lamp.select_set(True)
 bpy.context.view_layer.objects.active = lamp
-bpy.ops.object.apply_all_transforms()
+bpy.ops.kelit_toolkit.apply_all_transforms()
 t.check('apply_all_applied', all(abs(v - 1.0) < 1e-6 for v in cube.scale))
 t.check('apply_all_selection_restored', lamp.select_get() and cube.select_get()
         and bpy.context.view_layer.objects.active == lamp)
@@ -131,7 +131,7 @@ before = world_verts(cube)
 t.deselect_all()
 cube.select_set(True)
 bpy.context.view_layer.objects.active = cube
-bpy.ops.object.set_origin_preset(preset='BOTTOM_CENTER')
+bpy.ops.kelit_toolkit.set_origin_preset(preset='BOTTOM_CENTER')
 bpy.context.view_layer.update()
 after = world_verts(cube)
 t.check('origin_parented_geometry_stays',
@@ -144,7 +144,7 @@ t.fresh_scene()
 bpy.ops.mesh.primitive_cube_add()
 cube = bpy.context.active_object
 cube.modifiers.new('Subdiv', 'SUBSURF').levels = 2
-bpy.ops.object.create_collision_mesh(collision_type='UCX')
+bpy.ops.kelit_toolkit.create_collision_mesh(collision_type='UCX')
 ucx = next((o for o in bpy.data.objects if o.name.startswith('UCX_')), None)
 t.check('ucx_no_modifiers', ucx is not None and len(ucx.modifiers) == 0)
 if ucx is not None:

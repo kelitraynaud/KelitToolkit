@@ -271,7 +271,7 @@ class UNREAL_OT_connection_doctor(bpy.types.Operator):
     """Diagnose why the Unreal connection fails and fix the project files if
     needed: enables the Python and USD Importer plugins and turns remote
     execution on (with .bak backups). Restart Unreal after a fix"""
-    bl_idname = "unreal_toolkit.connection_doctor"
+    bl_idname = "kelit_toolkit.connection_doctor"
     bl_label = "Unreal Connection Doctor"
     bl_options = {'REGISTER'}
 
@@ -287,7 +287,7 @@ class UNREAL_OT_connection_doctor(bpy.types.Operator):
         return context.window_manager.invoke_props_dialog(self, width=440)
 
     def _diagnose(self, context):
-        key = context.scene.unreal_toolkit_settings.ue_project_dir
+        key = context.scene.kelit_toolkit_settings.ue_project_dir
         cached = getattr(self, '_diag_cache', None)
         if cached is not None and cached[0] == key:
             return cached[1]
@@ -297,7 +297,7 @@ class UNREAL_OT_connection_doctor(bpy.types.Operator):
 
     def draw(self, context):
         layout = self.layout
-        settings = context.scene.unreal_toolkit_settings
+        settings = context.scene.kelit_toolkit_settings
 
         box = layout.box()
         box.label(text="Checklist:", icon='INFO')
@@ -330,7 +330,7 @@ class UNREAL_OT_connection_doctor(bpy.types.Operator):
             layout.prop(self, "apply_fix")
 
     def execute(self, context):
-        settings = context.scene.unreal_toolkit_settings
+        settings = context.scene.kelit_toolkit_settings
         state, error = read_project_setup(settings.ue_project_dir)
         if error:
             self.report({'WARNING'}, error)
@@ -357,7 +357,7 @@ class UNREAL_OT_connection_doctor(bpy.types.Operator):
 
 class UNREAL_OT_test_connection(bpy.types.Operator):
     """Check that a running Unreal Editor answers over remote execution"""
-    bl_idname = "unreal_toolkit.test_connection"
+    bl_idname = "kelit_toolkit.test_connection"
     bl_label = "Test Unreal Connection"
     bl_options = {'REGISTER'}
 
@@ -376,7 +376,7 @@ class UNREAL_OT_test_connection(bpy.types.Operator):
         # open the doctor so the user sees WHY and can fix the project files
         # (only when no editor answered: that is what it diagnoses)
         if is_no_editor_error(message):
-            bpy.ops.unreal_toolkit.connection_doctor('INVOKE_DEFAULT')
+            bpy.ops.kelit_toolkit.connection_doctor('INVOKE_DEFAULT')
         return {'CANCELLED'}
 
 
@@ -385,12 +385,12 @@ class UNREAL_OT_fix_interchange_permanent(bpy.types.Operator):
     Config/DefaultEngine.ini so FBX files imported into Unreal use the legacy
     FBX importer. A .bak backup of the file is created first (requires an
     Unreal restart)"""
-    bl_idname = "unreal_toolkit.fix_interchange_permanent"
+    bl_idname = "kelit_toolkit.fix_interchange_permanent"
     bl_label = "Fix Interchange FBX (Permanent)"
     bl_options = {'REGISTER'}
 
     def invoke(self, context, event):
-        settings = context.scene.unreal_toolkit_settings
+        settings = context.scene.kelit_toolkit_settings
         ini_path, error = find_default_engine_ini(settings.ue_project_dir)
         if error:
             self.report({'WARNING'}, error)
@@ -408,7 +408,7 @@ class UNREAL_OT_fix_interchange_permanent(bpy.types.Operator):
         box.label(text="Restart Unreal Editor afterwards.", icon='INFO')
 
     def execute(self, context):
-        settings = context.scene.unreal_toolkit_settings
+        settings = context.scene.kelit_toolkit_settings
         ini_path, error = find_default_engine_ini(settings.ue_project_dir)
         if error:
             self.report({'WARNING'}, error)
