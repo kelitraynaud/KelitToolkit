@@ -153,11 +153,17 @@ class OBJECT_OT_create_collision_mesh(bpy.types.Operator):
                 # showed. Build the actual convex hull, then simplify it.
                 collision_obj = obj.copy()
                 collision_obj.data = obj.data.copy()
+                # the copy inherits the modifier stack: a Subsurf or Array
+                # left on the UCX re-shaped the hull again at export time
+                collision_obj.modifiers.clear()
                 context.collection.objects.link(collision_obj)
                 context.view_layer.objects.active = collision_obj
 
+                # hull the EVALUATED geometry (what Blender shows, modifiers
+                # included), not the raw mesh
+                evaluated = obj.evaluated_get(context.evaluated_depsgraph_get())
                 hull_bm = bmesh.new()
-                hull_bm.from_mesh(collision_obj.data)
+                hull_bm.from_mesh(evaluated.data)
                 result = bmesh.ops.convex_hull(hull_bm, input=hull_bm.verts)
                 interior = [element for element in result.get('geom_interior', [])
                             if isinstance(element, bmesh.types.BMVert)]
@@ -472,9 +478,10 @@ class OBJECT_OT_convert_to_low_poly(bpy.types.Operator):
 
     def execute(self, context):
         targets = [obj for obj in context.selected_objects
-                   if obj.type == 'MESH' and not obj.name.endswith('_LP')]
+                   if obj.type == 'MESH' and not obj.name.endswith('_LP')
+                   and not obj.library]
         if not targets:
-            self.report({'WARNING'}, "No mesh objects selected")
+            self.report({'WARNING'}, "No editable mesh objects selected")
             return {'CANCELLED'}
         if not (self.bake_normal or self.bake_ao or self.bake_basecolor):
             self.report({'WARNING'}, "Pick at least one map to bake")
@@ -486,20 +493,26 @@ class OBJECT_OT_convert_to_low_poly(bpy.types.Operator):
         size = int(self.bake_resolution)
         previous_engine = scene.render.engine
         previous_samples = None
-        scene.render.engine = 'CYCLES'
-        if hasattr(scene, 'cycles'):
-            previous_samples = scene.cycles.samples
-            scene.cycles.samples = self.bake_samples
-
-        # isolate each bake pair: anything else contributing AO or shadows
-        # would pollute the maps
         hidden_states = {}
-        for obj in context.view_layer.objects:
-            hidden_states[obj.name] = obj.hide_render
-            obj.hide_render = True
-
         converted, failures = [], []
+        # everything that changes scene state lives inside the try: a failure
+        # halfway (a linked object refusing hide_render, a bake error) must
+        # still put the render engine and the visibility flags back
         try:
+            scene.render.engine = 'CYCLES'
+            if hasattr(scene, 'cycles'):
+                previous_samples = scene.cycles.samples
+                scene.cycles.samples = self.bake_samples
+
+            # isolate each bake pair: anything else contributing AO or
+            # shadows would pollute the maps (linked objects are read-only
+            # and stay as they are)
+            for obj in context.view_layer.objects:
+                if obj.library:
+                    continue
+                hidden_states[obj.name] = obj.hide_render
+                obj.hide_render = True
+
             for high in targets:
                 high.hide_render = False
                 try:
