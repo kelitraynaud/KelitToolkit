@@ -159,6 +159,11 @@ class OBJECT_OT_apply_scale_instances(bpy.types.Operator):
                             f"Mesh '{mesh.name}': negative (mirrored) scale - "
                             "baking it would flip the geometry inside-out. Skipped")
                 continue
+            if any(min(abs(value) for value in obj.scale) < 1e-6 for obj in all_instances):
+                self.report({'WARNING'},
+                            f"Mesh '{mesh.name}': an instance has a zero scale - "
+                            "baking it would collapse the shared geometry. Skipped")
+                continue
 
             all_same_scale = all(
                 abs(obj.scale.x - scale.x) < 0.0001 and
@@ -567,13 +572,16 @@ class OBJECT_OT_apply_all_transforms(bpy.types.Operator):
             return {'CANCELLED'}
 
         # transform_apply raises on multi-user mesh data: route those to the
-        # instance-safe operators instead of showing a raw traceback
+        # instance-safe operators instead of showing a raw traceback (object
+        # users only: a fake user is not another instance)
         single_user = [obj for obj in selected_objs
-                       if obj.data is None or obj.data.users <= 1]
+                       if obj.data is None or len(mesh_users(obj.data)) <= 1]
         shared = [obj for obj in selected_objs if obj not in single_user]
 
         applied = 0
         if single_user:
+            previous_selection = list(context.selected_objects)
+            previous_active = context.view_layer.objects.active
             bpy.ops.object.select_all(action='DESELECT')
             for obj in single_user:
                 obj.select_set(True)
@@ -583,8 +591,10 @@ class OBJECT_OT_apply_all_transforms(bpy.types.Operator):
                 applied = len(single_user)
             except RuntimeError as error:
                 self.report({'WARNING'}, f"Apply failed: {str(error)[:120]}")
-            for obj in selected_objs:
-                obj.select_set(True)
+            finally:
+                for obj in previous_selection:
+                    obj.select_set(True)
+                context.view_layer.objects.active = previous_active
 
         message = f"Transforms applied on {applied} object(s)"
         if shared:
