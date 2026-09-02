@@ -13,13 +13,21 @@ def _get_remote_execution():
     return remote_execution
 
 
+def addon_root_package(package_name):
+    """Root package of the add-on, the key of its preferences: 'KelitToolkit'
+    for a classic install, 'bl_ext.<repo>.kelittoolkit' for an install from
+    the extension repository. Splitting on the first dot returned 'bl_ext'
+    for the latter, and the custom endpoints were silently ignored."""
+    return package_name.rsplit('.operators', 1)[0]
+
+
 def _build_config(remote_execution):
     """Connection config, honouring the add-on preferences when they exist
     (projects that changed UE's default remote-execution endpoints)."""
     config = remote_execution.RemoteExecutionConfig()
     try:
         import bpy
-        package = __package__.split('.')[0]
+        package = addon_root_package(__package__)
         prefs = bpy.context.preferences.addons[package].preferences
         config.multicast_group_endpoint = (prefs.multicast_group, prefs.multicast_port)
         config.command_endpoint = ('127.0.0.1', prefs.command_port)
