@@ -216,3 +216,51 @@ def normalize_name_for_unreal(name, object_type='MESH', preserve_collision=True,
         name = head_text + tail
 
     return name
+
+
+def _socket_value(socket):
+    """Rounded, hashable default value of an unlinked node socket."""
+    value = getattr(socket, 'default_value', None)
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return round(value, 4)
+    try:
+        return tuple(round(component, 4) for component in value)
+    except TypeError:
+        return str(value)
+
+
+def _node_fingerprint(node):
+    image = getattr(node, 'image', None)
+    image_key = ''
+    if image is not None:
+        # file name only: two image datablocks loaded from the same file
+        # (rooftop_001.jpg and rooftop_001.jpg.001) are the same texture
+        image_key = image.filepath.replace(chr(92), '/').rsplit('/', 1)[-1] or image.name
+    values = tuple(sorted(
+        (socket.identifier, _socket_value(socket))
+        for socket in node.inputs if not socket.is_linked and hasattr(socket, 'default_value')))
+    return (node.type, image_key, values)
+
+
+def material_fingerprint(material):
+    """Hashable description of what a material LOOKS like: node types, image
+    files, unlinked input values, links, surface settings. Two materials with
+    the same fingerprint render the same whatever their names (imports keep
+    creating rooftop_01, rooftop_01.001, ... copies of one material)."""
+    if material is None:
+        return None
+    surface = tuple(getattr(material, name, None)
+                    for name in ('surface_render_method', 'use_backface_culling'))
+    tree = getattr(material, 'node_tree', None)
+    if tree is None or not tree.nodes:
+        return ('flat', tuple(round(c, 4) for c in material.diffuse_color),
+                round(material.roughness, 4), round(material.metallic, 4), surface)
+    prints = {node.name: _node_fingerprint(node) for node in tree.nodes}
+    nodes = tuple(sorted(prints.values()))
+    links = tuple(sorted(
+        (prints[link.from_node.name], link.from_socket.identifier,
+         prints[link.to_node.name], link.to_socket.identifier)
+        for link in tree.links))
+    return ('nodes', nodes, links, surface)

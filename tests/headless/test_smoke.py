@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _harness import Harness  # noqa: E402
 
 import bpy  # noqa: E402
+import mathutils  # noqa: E402
 
 t = Harness()
 t.check('has_version', bool(getattr(t.module, 'bl_info', {}).get('version')))
@@ -151,5 +152,57 @@ if ucx is not None:
     evaluated = ucx.evaluated_get(bpy.context.evaluated_depsgraph_get())
     t.check('ucx_evaluated_is_raw', len(evaluated.data.vertices) == len(ucx.data.vertices))
     t.check('ucx_follows_evaluated_shape', len(ucx.data.vertices) > 8)
+
+# Detect Duplicates with the placement baked into the meshes (Maya-style
+# import) and duplicate materials with different names
+t.fresh_scene()
+image = bpy.data.images.new('T_rooftop', 8, 8)
+
+
+def rooftop_material(name):
+    material = bpy.data.materials.new(name)
+    tree = material.node_tree
+    tex = tree.nodes.new('ShaderNodeTexImage')
+    tex.image = image
+    principled = next(n for n in tree.nodes if n.type == 'BSDF_PRINCIPLED')
+    tree.links.new(tex.outputs['Color'], principled.inputs['Base Color'])
+    return material
+
+
+mat_a, mat_b = rooftop_material('rooftop_01'), rooftop_material('rooftop_01.001')
+boxes = []
+for name, offset, material in (('vent_a', (0, 0, 0), mat_a), ('vent_b', (22, -25, 0), mat_b)):
+    bpy.ops.mesh.primitive_cube_add()
+    box = bpy.context.active_object
+    box.name = name
+    for v in box.data.vertices:
+        v.co += mathutils.Vector(offset)   # placement written into the mesh
+    box.data.materials.append(material)
+    box.location = (5, 5, 0)               # both objects share one transform
+    boxes.append(box)
+bpy.context.view_layer.update()
+world_before = {box.name: world_verts(box) for box in boxes}
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.kelit_toolkit.detect_and_replace_instances(
+    'EXEC_DEFAULT', search_scope='SELECTED', baked_positions=True,
+    compare_materials='CONTENT', rename_to_mesh=False)
+bpy.context.view_layer.update()
+mesh_objects = [o for o in bpy.data.objects if o.type == 'MESH']
+t.check('dupes_baked_instanced', len(mesh_objects) == 2
+        and len({o.data.name for o in mesh_objects}) == 1)
+instance = next((o for o in mesh_objects if o.name != 'vent_a'), None)
+t.check('dupes_baked_placement', instance is not None and all(
+    all(abs(a[i] - b[i]) < 1e-3 for i in range(3))
+    for a, b in zip(world_before['vent_b'], world_verts(instance))))
+
+# Merge Duplicate Materials: one material left, every slot reassigned
+count_before = len(bpy.data.materials)
+bpy.ops.kelit_toolkit.merge_duplicate_materials('EXEC_DEFAULT')
+t.check('materials_merged', bpy.data.materials.get('rooftop_01.001') is None
+        and bpy.data.materials.get('rooftop_01') is not None
+        and len(bpy.data.materials) == count_before - 1)
+t.check('materials_reassigned', all(
+    material is not None and material.name == 'rooftop_01'
+    for mesh in bpy.data.meshes for material in mesh.materials))
 
 t.finish('SMOKE')

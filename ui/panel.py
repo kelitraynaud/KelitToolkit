@@ -33,6 +33,7 @@ from ..operators.materials import (
     OBJECT_OT_create_material_by_mesh,
     OBJECT_OT_delete_unused_materials,
     OBJECT_OT_purge_unused_materials,
+    OBJECT_OT_merge_duplicate_materials,
 )
 from ..operators.material_conversion import (
     OBJECT_OT_convert_to_simple_pbr,
@@ -395,6 +396,8 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
                      text="Delete Unused Materials", icon='TRASH')
         col.operator(OBJECT_OT_purge_unused_materials.bl_idname,
                      text="Purge Unused Materials", icon='CANCEL')
+        col.operator(OBJECT_OT_merge_duplicate_materials.bl_idname,
+                     text="Merge Duplicate Materials", icon='DUPLICATE')
 
         box.separator()
         box.label(text="Scene Cleanup:")

@@ -1,8 +1,9 @@
 """Instance management operators for KelitToolkit"""
 
 import bpy
+import mathutils
 from collections import defaultdict
-from ..utils import clean_name
+from ..utils import clean_name, material_fingerprint
 
 
 class OBJECT_OT_replace_with_active_instance(bpy.types.Operator):
@@ -158,74 +159,95 @@ class OBJECT_OT_detect_and_replace_instances(bpy.types.Operator):
         default=True
     )
 
-    def invoke(self, context, event):
-        # Pre-scan to show statistics
-        mesh_objects = self.get_search_objects(context)
+    baked_positions: bpy.props.BoolProperty(
+        name="Positions Baked in Mesh",
+        description="Compare the shape regardless of where it sits inside the mesh: "
+                    "imports from Maya or Cinema 4D often write each copy's placement "
+                    "into the vertices. The instances are offset so they stay exactly "
+                    "where the originals were",
+        default=True
+    )
 
+    compare_materials: bpy.props.EnumProperty(
+        name="Materials",
+        description="What makes two materials 'the same' for the comparison",
+        items=[
+            ('CONTENT', "Same textures and values",
+             "Materials with the same images, values and links match, whatever "
+             "their names (rooftop_01 and rooftop_01.001 are one material)"),
+            ('NAME', "Same names", "Only objects using the very same materials match"),
+            ('IGNORE', "Ignore materials", "Compare geometry and UVs only"),
+        ],
+        default='CONTENT'
+    )
+
+    def invoke(self, context, event):
+        mesh_objects = self.get_search_objects(context)
         if not mesh_objects:
             self.report({'WARNING'}, "No mesh objects to analyze")
             return {'CANCELLED'}
-
-        # Analyze duplicates
-        duplicate_groups = self.find_duplicate_meshes(mesh_objects)
-
-        if not duplicate_groups:
+        if not self._scan(context):
             self.report({'INFO'}, "No duplicate meshes found")
             return {'CANCELLED'}
-
-        # Store for use in draw/execute
-        self.duplicate_groups = duplicate_groups
-        self.total_objects = len(mesh_objects)
-        self.duplicate_count = sum(len(group) for group in duplicate_groups.values())
-
         return context.window_manager.invoke_props_dialog(self, width=450)
 
-    def draw(self, _context):
-        layout = self.layout
+    def _scan(self, context):
+        """Duplicate groups for the current options, cached per option set so
+        the dialog can redraw freely (a redo panel re-instantiates the
+        operator without invoke: getattr with defaults everywhere)."""
+        key = (self.search_scope, self.baked_positions, self.compare_materials)
+        cached = getattr(self, '_scan_cache', None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        mesh_objects = self.get_search_objects(context)
+        groups = self.find_duplicate_meshes(mesh_objects)
+        self.total_objects = len(mesh_objects)
+        self._scan_cache = (key, groups)
+        return groups
 
-        # the redo panel re-instantiates the operator without invoke()
-        groups = getattr(self, 'duplicate_groups', {})
+    def draw(self, context):
+        layout = self.layout
+        groups = self._scan(context)
         total_objects = getattr(self, 'total_objects', 0)
-        duplicate_count = getattr(self, 'duplicate_count', 0)
+        duplicate_count = sum(len(group) for group in groups.values())
 
         # Statistics box
         box = layout.box()
         box.label(text="Duplicate Detection Results:", icon='INFO')
-        box.label(text=f"  • Total objects analyzed: {total_objects}")
-        box.label(text=f"  • Duplicate groups found: {len(groups)}")
-        box.label(text=f"  • Objects that could be instanced: {duplicate_count}")
+        box.label(text=f"  Total objects analyzed: {total_objects}")
+        box.label(text=f"  Duplicate groups found: {len(groups)}")
+        box.label(text=f"  Objects that could be instanced: {duplicate_count}")
 
         layout.separator()
 
         # Show first few duplicate groups
         box = layout.box()
         box.label(text="Duplicate Groups:", icon='OUTLINER_OB_MESH')
-
-        shown = 0
         max_show = 5
-
         for mesh_data, objects in list(groups.items())[:max_show]:
-            shown += 1
-            row = box.row()
-            row.label(text=f"  • {mesh_data.name}: {len(objects)} duplicates")
-
+            box.label(text=f"  {mesh_data.name}: {len(objects)} duplicates")
         if len(groups) > max_show:
             box.label(text=f"  ... and {len(groups) - max_show} more groups")
+        if not groups:
+            box.label(text="  none with these options")
 
         layout.separator()
 
-        # Options
+        # Options (the counts above follow them)
+        layout.prop(self, "baked_positions")
+        layout.prop(self, "compare_materials")
         layout.prop(self, "rename_to_mesh")
 
         layout.separator()
         box = layout.box()
-        box.label(text="✓ Will convert to instances", icon='CHECKMARK')
+        box.label(text="Will convert to instances", icon='CHECKMARK')
         box.label(text="(Keeps first object as master)")
 
     def execute(self, context):
         # ALWAYS recompute here: a redo (F9) first undoes the previous run,
         # which both re-instantiates the operator (no invoke) and leaves any
         # stored object references dangling
+        self._scan_cache = None
         mesh_objects = self.get_search_objects(context)
         self.duplicate_groups = self.find_duplicate_meshes(mesh_objects)
         if not self.duplicate_groups:
@@ -260,8 +282,17 @@ class OBJECT_OT_detect_and_replace_instances(bpy.types.Operator):
                 for coll in obj.users_collection:
                     coll.objects.link(new_obj)
 
-                # Copy the world matrix to preserve exact position/rotation/scale in world space
-                new_obj.matrix_world = obj.matrix_world.copy()
+                # Copy the world matrix to preserve exact position/rotation/scale
+                # in world space. With baked positions the two meshes differ by
+                # a translation inside the mesh: shift the instance by that
+                # delta (in its own local space) so the geometry lands exactly
+                # where the original's did
+                new_matrix = obj.matrix_world.copy()
+                centroids = getattr(self, '_centroids', {})
+                if obj.name in centroids and master.name in centroids:
+                    delta = centroids[obj.name] - centroids[master.name]
+                    new_matrix = new_matrix @ mathutils.Matrix.Translation(delta)
+                new_obj.matrix_world = new_matrix
 
                 # Copy modifiers from original object to preserve them
                 for mod in obj.modifiers:
@@ -306,6 +337,23 @@ class OBJECT_OT_detect_and_replace_instances(bpy.types.Operator):
         # The signature must cover more than raw geometry: two meshes with
         # the same shape but different UVs, materials or shape keys are NOT
         # interchangeable - collapsing them would silently destroy variants
+        baked = getattr(self, 'baked_positions', True)
+        material_mode = getattr(self, 'compare_materials', 'CONTENT')
+        centroids = {}
+
+        def mesh_centroid(mesh_data):
+            total = mathutils.Vector()
+            for vertex in mesh_data.vertices:
+                total += vertex.co
+            return total / max(len(mesh_data.vertices), 1)
+
+        def material_key(material):
+            if material_mode == 'IGNORE':
+                return ''
+            if material_mode == 'NAME':
+                return material.name if material else ''
+            return material_fingerprint(material)
+
         def get_mesh_signature(mesh_data):
             """Create a hashable signature of the mesh + its surfacing"""
             if not mesh_data:
@@ -316,9 +364,13 @@ class OBJECT_OT_detect_and_replace_instances(bpy.types.Operator):
             edge_count = len(mesh_data.edges)
             poly_count = len(mesh_data.polygons)
 
-            # Get vertex positions (rounded to avoid floating point issues)
+            # Vertex positions, rounded to a tenth of a millimetre (float32
+            # coordinates far from the origin carry no more precision than
+            # that). Baked mode measures them from the mesh centroid so the
+            # same shape written at two places in the file still matches
+            origin = mesh_centroid(mesh_data) if baked else mathutils.Vector()
             vert_positions = tuple(
-                tuple(round(v.co[i], 6) for i in range(3))
+                tuple(round(component, 4) for component in (v.co - origin))
                 for v in mesh_data.vertices
             )
 
@@ -328,9 +380,8 @@ class OBJECT_OT_detect_and_replace_instances(bpy.types.Operator):
                 for e in mesh_data.edges
             )
 
-            # material slots (names, in order) + per-face assignment checksum
-            material_names = tuple(
-                mat.name if mat else '' for mat in mesh_data.materials)
+            # material slots (in order) + per-face assignment checksum
+            material_names = tuple(material_key(mat) for mat in mesh_data.materials)
             material_assignment = tuple(
                 poly.material_index for poly in mesh_data.polygons)
 
@@ -360,6 +411,8 @@ class OBJECT_OT_detect_and_replace_instances(bpy.types.Operator):
                 signature = get_mesh_signature(obj.data)
                 if signature:
                     signature_groups[signature].append(obj)
+                    if baked:
+                        centroids[obj.name] = mesh_centroid(obj.data)
 
         # Filter groups that have more than one object (duplicates)
         # Convert back to a dict with the first mesh as key for display
@@ -369,6 +422,7 @@ class OBJECT_OT_detect_and_replace_instances(bpy.types.Operator):
                 # Use the first object's mesh as the key
                 duplicate_groups[objs[0].data] = objs
 
+        self._centroids = centroids
         return duplicate_groups
 
 

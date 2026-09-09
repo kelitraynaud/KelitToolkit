@@ -1,5 +1,43 @@
 import bpy
-from ..utils import clean_name
+from collections import defaultdict
+from ..utils import clean_name, material_fingerprint
+
+
+def find_duplicate_materials():
+    """Groups of local materials that look the same (same images, values,
+    links and surface settings), whatever their names."""
+    groups = defaultdict(list)
+    for material in bpy.data.materials:
+        if material.library is not None or getattr(material, 'is_grease_pencil', False):
+            continue
+        key = material_fingerprint(material)
+        if key is not None:
+            groups[key].append(material)
+    return [group for group in groups.values() if len(group) > 1]
+
+
+def pick_material_to_keep(group):
+    """The copy whose name is closest to the base name: rooftop_01 before
+    rooftop_01.001 before rooftop_01.010."""
+    return min(group, key=lambda m: (m.name != clean_name(m.name), len(m.name), m.name))
+
+
+def replace_materials(copies, keep):
+    """Point every slot of the file that uses one of `copies` at `keep`."""
+    copies = set(copies)
+    for collection in (bpy.data.meshes, bpy.data.curves):
+        for datablock in collection:
+            if datablock.library is not None:
+                continue
+            for index, material in enumerate(datablock.materials):
+                if material in copies:
+                    datablock.materials[index] = keep
+    for obj in bpy.data.objects:
+        if obj.library is not None:
+            continue
+        for slot in obj.material_slots:
+            if slot.link == 'OBJECT' and slot.material in copies:
+                slot.material = keep
 
 
 # ============================================================================
@@ -121,10 +159,62 @@ class OBJECT_OT_purge_unused_materials(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class OBJECT_OT_merge_duplicate_materials(bpy.types.Operator):
+    """Merge materials that look the same (same textures, values and links)
+    into one, whatever their names: rooftop_01, rooftop_01.001, ... become
+    rooftop_01. Every object of the file that used a copy is reassigned to
+    the kept material and the copies are removed"""
+    bl_idname = "kelit_toolkit.merge_duplicate_materials"
+    bl_label = "Merge Duplicate Materials"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def invoke(self, context, event):
+        if not find_duplicate_materials():
+            self.report({'INFO'}, "No duplicate materials found")
+            return {'CANCELLED'}
+        return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def draw(self, _context):
+        layout = self.layout
+        groups = find_duplicate_materials()
+        removed = sum(len(group) - 1 for group in groups)
+        layout.label(text=f"{removed} material(s) will be merged into {len(groups)}", icon='INFO')
+        box = layout.box()
+        max_show = 6
+        for group in groups[:max_show]:
+            box.label(text=f"  {pick_material_to_keep(group).name}: {len(group) - 1} copies")
+        if len(groups) > max_show:
+            box.label(text=f"  ... and {len(groups) - max_show} more")
+        layout.label(text="Applies to every object of the file. The copies are deleted.")
+
+    def execute(self, _context):
+        groups = find_duplicate_materials()
+        if not groups:
+            self.report({'INFO'}, "No duplicate materials found")
+            return {'CANCELLED'}
+
+        merged = 0
+        for group in groups:
+            keep = pick_material_to_keep(group)
+            copies = [material for material in group if material != keep]
+            replace_materials(copies, keep)
+            for copy in copies:
+                bpy.data.materials.remove(copy)
+                merged += 1
+            base = clean_name(keep.name)
+            if base != keep.name and base not in bpy.data.materials:
+                keep.name = base
+
+        self.report({'INFO'}, f"{merged} duplicate material(s) merged into {len(groups)}, "
+                              f"{len(bpy.data.materials)} material(s) remaining")
+        return {'FINISHED'}
+
+
 classes = (
     OBJECT_OT_create_material_by_mesh,
     OBJECT_OT_delete_unused_materials,
     OBJECT_OT_purge_unused_materials,
+    OBJECT_OT_merge_duplicate_materials,
 )
 
 
