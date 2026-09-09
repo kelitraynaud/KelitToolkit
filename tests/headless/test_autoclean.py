@@ -106,4 +106,38 @@ t.check('names_normalized', all(o.name.startswith('SM_') for o in meshes)
 t.check('options_remembered', scene.kelit_toolkit_settings.auto_clean_options_saved
         and scene.kelit_toolkit_settings.auto_clean_origin_preset == 'BOTTOM_CENTER')
 
+# organization kept as a collection named after the deleted root empty
+building = bpy.data.collections.get('asia_building')
+t.check('organization_collection', building is not None
+        and all(o.name in building.objects for o in meshes)
+        and building.name in scene.collection.children)
+
+# the report window has the run's lines
+report_lines = bpy.context.window_manager.kelit_report_lines
+t.check('report_stored', len(report_lines) >= 7
+        and bpy.context.window_manager.kelit_report_title == 'Auto Clean'
+        and report_lines[0].kind == 'INFO')
+
+# ---- organization = keep parent empties: the root stays, transforms go down ----
+scene = t.fresh_scene()
+root = bpy.data.objects.new('building_root', None)
+root.scale = (0.01, 0.01, 0.01)
+root.rotation_euler = (math.radians(90), 0, 0)
+bpy.context.collection.objects.link(root)
+bpy.ops.mesh.primitive_cube_add(location=(3, 4, 5))
+cube = bpy.context.active_object
+cube.parent = root
+bpy.context.view_layer.update()
+cube_before = world_verts(cube)
+bpy.ops.kelit_toolkit.auto_clean('EXEC_DEFAULT', scope='SCENE', organization='PARENTS',
+                                 normalize_names=False)
+bpy.context.view_layer.update()
+t.check('parents_kept', root.name in bpy.data.objects and cube.parent == root)
+t.check('parents_neutralized', all(abs(v - 1.0) < 1e-6 for v in root.scale)
+        and all(abs(v) < 1e-6 for v in root.rotation_euler))
+t.check('parents_child_applied', all(abs(v - 1.0) < 1e-6 for v in cube.scale)
+        and all(abs(v) < 1e-6 for v in cube.rotation_euler))
+t.check('parents_world_unchanged', all(
+    all(abs(a[i] - b[i]) < 1e-4 for i in range(3)) for a, b in zip(cube_before, world_verts(cube))))
+
 t.finish('AUTOCLEAN')

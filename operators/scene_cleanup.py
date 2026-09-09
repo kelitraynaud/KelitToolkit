@@ -1,6 +1,19 @@
 """Scene cleanup operators for KelitToolkit"""
 
 import bpy
+import mathutils
+
+
+ORGANIZATION_ITEMS = [
+    ('COLLECTIONS', "Keep as collections",
+     "Each deleted empty that had children becomes a collection with the same name, "
+     "nested like the empties were"),
+    ('PARENTS', "Keep parent empties",
+     "Empties with children stay. Their rotation and scale are pushed down to the "
+     "children so the meshes can be cleaned. Only empties without children are deleted"),
+    ('FLAT', "Flatten",
+     "Empties are deleted, their children re-parented one level up"),
+]
 
 
 # ============================================================================
@@ -187,6 +200,13 @@ class OBJECT_OT_delete_unused_empties(bpy.types.Operator):
         default=True
     )
 
+    organization: bpy.props.EnumProperty(
+        name="Organization",
+        description="What becomes of the structure the empties gave the scene",
+        items=ORGANIZATION_ITEMS,
+        default='COLLECTIONS'
+    )
+
     # ------------------------------------------------------------------
     def _ancestors(self, obj):
         parent = obj.parent
@@ -264,43 +284,106 @@ class OBJECT_OT_delete_unused_empties(bpy.types.Operator):
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self, width=420)
 
+    def _candidates(self, context):
+        """(empties to delete, structural empties kept because of the
+        organization mode, protected empties with their reason)."""
+        protected = self._protected_empties(context)
+        pool = (context.scene.objects if self.process_all else context.selected_objects)
+        candidates = [o for o in pool if o.type == 'EMPTY' and o.name not in protected]
+        structural = []
+        if self.organization == 'PARENTS':
+            structural = [o for o in candidates if o.children]
+            candidates = [o for o in candidates if not o.children]
+        return candidates, structural, protected
+
+    def _depth(self, obj):
+        return sum(1 for _ in self._ancestors(obj))
+
+    def _collections_for(self, context, candidates):
+        """One collection per deleted empty that has children, nested like
+        the empties (top-down so parents exist before their children)."""
+        result = {}
+        for empty in sorted(candidates, key=self._depth):
+            if not empty.children:
+                continue
+            parent = empty.parent
+            if parent is not None and parent.name in result:
+                container = result[parent.name]
+            elif empty.users_collection:
+                container = empty.users_collection[0]
+            else:
+                container = context.scene.collection
+            collection = container.children.get(empty.name)
+            if collection is None:
+                collection = bpy.data.collections.new(empty.name)
+                container.children.link(collection)
+            result[empty.name] = collection
+        return result
+
+    def _push_transforms_down(self, structural):
+        """Keep the empties but leave them a plain location: their rotation
+        and scale go to the children (world transforms unchanged), so the
+        meshes can then be applied. Top-down, level by level."""
+        for empty in sorted(structural, key=self._depth):
+            saved = [(child, child.matrix_world.copy()) for child in empty.children]
+            empty.matrix_world = mathutils.Matrix.Translation(empty.matrix_world.translation)
+            for child, world in saved:
+                child.matrix_world = world
+        bpy.context.view_layer.update()
+
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "preserve_camera_rig")
         layout.prop(self, "process_all")
+        layout.prop(self, "organization")
 
-        protected = self._protected_empties(context)
-        pool = (context.scene.objects if self.process_all else context.selected_objects)
-        candidates = [o for o in pool if o.type == 'EMPTY' and o.name not in protected]
+        candidates, structural, protected = self._candidates(context)
         box = layout.box()
         box.label(text=f"{len(candidates)} empty(ies) will be deleted", icon='TRASH')
+        if structural:
+            box.label(text=f"{len(structural)} parent empty(ies) kept, transforms pushed down",
+                      icon='OUTLINER_OB_EMPTY')
         box.label(text=f"{len(protected)} kept (rig / animation)", icon='LOCKED')
         for name in list(protected)[:4]:
             box.label(text=f"   kept: {name} - {protected[name]}")
 
     def execute(self, context):
-        protected = self._protected_empties(context)
-        pool = (context.scene.objects if self.process_all else context.selected_objects)
-        candidates = [o for o in pool if o.type == 'EMPTY' and o.name not in protected]
-        if not candidates:
+        candidates, structural, protected = self._candidates(context)
+        if not candidates and not structural:
             self.report({'INFO'}, "No unused empty found")
             return {'CANCELLED'}
 
-        # deepest first, so children are re-parented at most once per level
-        def depth(obj):
-            return sum(1 for _ in self._ancestors(obj))
+        if structural:
+            self._push_transforms_down(structural)
 
+        collections = {}
+        if self.organization == 'COLLECTIONS':
+            collections = self._collections_for(context, candidates)
+
+        # deepest first, so children are re-parented at most once per level
         deleted = 0
-        for empty in sorted(candidates, key=depth, reverse=True):
+        for empty in sorted(candidates, key=self._depth, reverse=True):
             grandparent = empty.parent
+            target = collections.get(empty.name)
             for child in list(empty.children):
                 world = child.matrix_world.copy()
                 child.parent = grandparent
                 child.matrix_world = world
+                if target is not None and child.name not in target.objects:
+                    # the child moves into the empty's collection, leaving
+                    # the collections it only shared with the empty
+                    target.objects.link(child)
+                    for collection in list(child.users_collection):
+                        if collection != target and empty.name in collection.objects:
+                            collection.objects.unlink(child)
             bpy.data.objects.remove(empty, do_unlink=True)
             deleted += 1
 
         message = f"Deleted {deleted} empty(ies)"
+        if collections:
+            message += f", {len(collections)} collection(s) created"
+        if structural:
+            message += f", {len(structural)} parent empty(ies) kept"
         if protected:
             message += f", kept {len(protected)} (camera rig / animation)"
         self.report({'INFO'}, message)

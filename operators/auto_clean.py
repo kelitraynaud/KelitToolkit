@@ -8,7 +8,8 @@ from ..utils import normalize_name_for_unreal
 from .export import collect_validation_issues
 from .instances import OBJECT_OT_detect_and_replace_instances
 from .materials import find_duplicate_materials
-from .scene_cleanup import OBJECT_OT_delete_unused_empties
+from .report import set_report, validation_lines
+from .scene_cleanup import OBJECT_OT_delete_unused_empties, ORGANIZATION_ITEMS
 
 
 ORIGIN_PRESETS = [
@@ -74,13 +75,17 @@ class _Probe:
     _driver_targets = OBJECT_OT_delete_unused_empties._driver_targets
 
 
-def compute_preview(context, pool, origin_preset):
+def compute_preview(context, pool, origin_preset, organization='COLLECTIONS'):
     """What each Auto Clean step would touch on `pool` (visible, editable
     objects in scope). Read-only."""
     meshes = [obj for obj in pool if obj.type == 'MESH' and obj.data]
     probe = _Probe()
     protected = OBJECT_OT_delete_unused_empties._protected_empties(probe, context)
     empties = [obj for obj in pool if obj.type == 'EMPTY' and obj.name not in protected]
+    structural = 0
+    if organization == 'PARENTS':
+        structural = sum(1 for obj in empties if obj.children)
+        empties = [obj for obj in empties if not obj.children]
     groups = OBJECT_OT_detect_and_replace_instances.find_duplicate_meshes(probe, meshes)
     seen = set()
     origins = 0
@@ -106,7 +111,7 @@ def compute_preview(context, pool, origin_preset):
         'hidden': sum(1 for obj in context.scene.objects if not obj.visible_get()),
         'materials': sum(len(group) - 1 for group in find_duplicate_materials()),
         'empties': len(empties),
-        'empties_kept': len(protected),
+        'empties_kept': len(protected) + structural,
         'duplicates': sum(len(objs) - 1 for objs in groups.values()),
         'transforms': sum(1 for obj in meshes
                           if has_unapplied_transform(obj, world=True)
@@ -150,6 +155,12 @@ class OBJECT_OT_auto_clean(bpy.types.Operator):
                     "animated parents are kept",
         default=True
     )
+    organization: bpy.props.EnumProperty(
+        name="Organization",
+        description="What becomes of the structure the empties gave the scene",
+        items=ORGANIZATION_ITEMS,
+        default='COLLECTIONS'
+    )
     instance_duplicates: bpy.props.BoolProperty(
         name="Duplicates to Instances",
         description="Objects with the same shape, UVs and materials share one mesh "
@@ -186,9 +197,9 @@ class OBJECT_OT_auto_clean(bpy.types.Operator):
         default=True
     )
 
-    REMEMBERED_OPTIONS = ('scope', 'merge_materials', 'delete_empties', 'instance_duplicates',
-                          'apply_transforms', 'set_origins', 'origin_preset',
-                          'normalize_names', 'validate')
+    REMEMBERED_OPTIONS = ('scope', 'merge_materials', 'delete_empties', 'organization',
+                          'instance_duplicates', 'apply_transforms', 'set_origins',
+                          'origin_preset', 'normalize_names', 'validate')
 
     @classmethod
     def poll(cls, context):
@@ -223,11 +234,12 @@ class OBJECT_OT_auto_clean(bpy.types.Operator):
     # ------------------------------------------------------------------
     # preview
     def _preview(self, context):
-        key = (self.scope, self.origin_preset)
+        key = (self.scope, self.origin_preset, self.organization)
         cached = getattr(self, '_preview_cache', None)
         if cached is not None and cached[0] == key:
             return cached[1]
-        preview = compute_preview(context, self._pool(context), self.origin_preset)
+        preview = compute_preview(context, self._pool(context), self.origin_preset,
+                                  self.organization)
         self._preview_cache = (key, preview)
         return preview
 
@@ -265,6 +277,9 @@ class OBJECT_OT_auto_clean(bpy.types.Operator):
 
         step("merge_materials", f"{preview['materials']} to merge")
         step("delete_empties", f"{preview['empties']} to delete, {preview['empties_kept']} kept")
+        row = layout.row()
+        row.enabled = self.delete_empties
+        row.prop(self, "organization")
         step("instance_duplicates", f"{preview['duplicates']} to instance")
         refused = (f", {preview['transforms_refused']} skipped (mirror or zero scale)"
                    if preview['transforms_refused'] else '')
@@ -301,12 +316,19 @@ class OBJECT_OT_auto_clean(bpy.types.Operator):
             if self.delete_empties:
                 empties = [obj for obj in self._pool(context) if obj.type == 'EMPTY']
                 before = len(context.scene.objects)
+                collections_before = len(bpy.data.collections)
                 if empties:
                     self._select(context, empties)
                     bpy.ops.kelit_toolkit.delete_unused_empties(
                         'EXEC_DEFAULT', preserve_camera_rig=True,
-                        process_all=(self.scope == 'SCENE'))
-                report.append(f"Unused empties deleted: {before - len(context.scene.objects)}")
+                        process_all=(self.scope == 'SCENE'),
+                        organization=self.organization)
+                line = f"Unused empties deleted: {before - len(context.scene.objects)}"
+                if self.organization == 'COLLECTIONS':
+                    line += f", {len(bpy.data.collections) - collections_before} collection(s) created"
+                elif self.organization == 'PARENTS':
+                    line += ", parent empties kept"
+                report.append(line)
 
             if self.instance_duplicates:
                 meshes = self._meshes(context)
@@ -373,20 +395,21 @@ class OBJECT_OT_auto_clean(bpy.types.Operator):
             if initial_active and initial_active in bpy.data.objects:
                 context.view_layer.objects.active = bpy.data.objects[initial_active]
 
-        details = issues[:6] + warnings[:4]
         print("\n=== Auto Clean ===")
         for line in report + issues + warnings:
             print(line)
+        set_report(context, "Auto Clean",
+                   [('INFO', line) for line in report] + validation_lines(issues, warnings))
 
         def draw_report(menu, _context):
             for line in report:
                 menu.layout.label(text=line)
-            if details:
+            if issues or warnings:
                 menu.layout.separator()
-                for line in details:
+                for line in (issues + warnings)[:4]:
                     menu.layout.label(text=line)
-                if len(issues) + len(warnings) > len(details):
-                    menu.layout.label(text="... full list in the System Console (Window menu)")
+            menu.layout.separator()
+            menu.layout.operator('kelit_toolkit.show_report', text="Show full report", icon='TEXT')
 
         # no popup without a window (background mode): the console report is enough
         if not bpy.app.background and context.window is not None:

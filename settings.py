@@ -63,6 +63,7 @@ class UnrealToolkitSettings(bpy.types.PropertyGroup):
     auto_clean_scope: bpy.props.StringProperty(default='SCENE')
     auto_clean_merge_materials: bpy.props.BoolProperty(default=True)
     auto_clean_delete_empties: bpy.props.BoolProperty(default=True)
+    auto_clean_organization: bpy.props.StringProperty(default='COLLECTIONS')
     auto_clean_instance_duplicates: bpy.props.BoolProperty(default=True)
     auto_clean_apply_transforms: bpy.props.BoolProperty(default=True)
     auto_clean_set_origins: bpy.props.BoolProperty(default=True)

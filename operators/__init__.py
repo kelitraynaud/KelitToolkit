@@ -13,10 +13,12 @@ from . import unified_export
 from . import unreal_link
 from . import usd_sync
 from . import ue_materials
+from . import report
 from . import auto_clean
 
 
 def register():
+    report.register()
     auto_clean.register()
     instances.register()
     origin.register()
@@ -48,3 +50,4 @@ def unregister():
     origin.unregister()
     instances.unregister()
     auto_clean.unregister()
+    report.unregister()

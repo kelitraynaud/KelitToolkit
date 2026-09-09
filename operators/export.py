@@ -99,25 +99,16 @@ class OBJECT_OT_validate_for_unreal(bpy.types.Operator):
 
         issues, warnings = collect_validation_issues(selected_objs)
 
+        from .report import open_report, set_report, validation_lines
         if issues or warnings:
-            print("\n" + "="*50)
-            print("UNREAL ENGINE VALIDATION REPORT")
-            print("="*50)
-
-            if issues:
-                print("\n[!] CRITICAL ISSUES:")
-                for issue in issues:
-                    print(issue)
-
-            if warnings:
-                print("\n[i] WARNINGS:")
-                for warning in warnings:
-                    print(warning)
-
-            print("="*50 + "\n")
-
-            self.report({'WARNING'}, f"{len(issues)} issue(s), {len(warnings)} warning(s) - See console")
+            set_report(context, "Validate for Unreal", validation_lines(issues, warnings))
+            for line in issues + warnings:
+                print(line)
+            self.report({'WARNING'}, f"{len(issues)} issue(s), {len(warnings)} warning(s)")
+            open_report(context)
         else:
+            set_report(context, "Validate for Unreal",
+                       [('INFO', f"{len(selected_objs)} object(s) validated, nothing to fix")])
             self.report({'INFO'}, f"{len(selected_objs)} object(s) validated for Unreal")
 
         return {'FINISHED'}
