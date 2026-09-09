@@ -5,12 +5,13 @@ import mathutils
 
 
 ORGANIZATION_ITEMS = [
-    ('COLLECTIONS', "Keep as collections",
+    ('PARENTS', "Keep parent hierarchy",
+     "Empties with children stay as they are organised. Their rotation and scale are "
+     "pushed down to the children so the meshes can be cleaned. Only empties without "
+     "children are deleted"),
+    ('COLLECTIONS', "Turn into collections",
      "Each deleted empty that had children becomes a collection with the same name, "
      "nested like the empties were"),
-    ('PARENTS', "Keep parent empties",
-     "Empties with children stay. Their rotation and scale are pushed down to the "
-     "children so the meshes can be cleaned. Only empties without children are deleted"),
     ('FLAT', "Flatten",
      "Empties are deleted, their children re-parented one level up"),
 ]
@@ -204,7 +205,7 @@ class OBJECT_OT_delete_unused_empties(bpy.types.Operator):
         name="Organization",
         description="What becomes of the structure the empties gave the scene",
         items=ORGANIZATION_ITEMS,
-        default='COLLECTIONS'
+        default='PARENTS'
     )
 
     # ------------------------------------------------------------------

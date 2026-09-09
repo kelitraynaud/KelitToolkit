@@ -80,7 +80,7 @@ class _Probe:
     _driver_targets = OBJECT_OT_delete_unused_empties._driver_targets
 
 
-def compute_preview(context, pool, origin_preset, organization='COLLECTIONS'):
+def compute_preview(context, pool, origin_preset, organization='PARENTS'):
     """What each Auto Clean step would touch on `pool` (visible, editable
     objects in scope). Read-only."""
     meshes = [obj for obj in pool if obj.type == 'MESH' and obj.data]
@@ -176,7 +176,7 @@ class OBJECT_OT_auto_clean(bpy.types.Operator):
         name="Organization",
         description="What becomes of the structure the empties gave the scene",
         items=ORGANIZATION_ITEMS,
-        default='COLLECTIONS'
+        default='PARENTS'
     )
     rejoin_splits: bpy.props.BoolProperty(
         name="Rejoin Material Splits",
