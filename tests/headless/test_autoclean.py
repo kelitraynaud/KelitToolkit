@@ -60,6 +60,16 @@ def world_verts(obj):
 
 before = {box.name: world_verts(box) for box in boxes}
 t.check('poll_object_mode', bpy.ops.kelit_toolkit.auto_clean.poll())
+
+# the dialog preview counts on the scene as it is (3 meshes before
+# instancing, 7 names before two empties disappear)
+auto_clean = t.submodule('operators.auto_clean')
+pool = [o for o in scene.objects if o.library is None and o.visible_get()]
+preview = auto_clean.compute_preview(bpy.context, pool, 'BOTTOM_CENTER')
+t.check('preview_counts', preview['materials'] == 2 and preview['empties'] == 2
+        and preview['empties_kept'] == 1 and preview['duplicates'] == 2
+        and preview['transforms'] == 3 and preview['transforms_refused'] == 0
+        and preview['origins'] == 3 and preview['renames'] == 7, preview)
 result = bpy.ops.kelit_toolkit.auto_clean('EXEC_DEFAULT', scope='SCENE', origin_preset='BOTTOM_CENTER')
 bpy.context.view_layer.update()
 t.check('auto_clean_finished', list(result) == ['FINISHED'])

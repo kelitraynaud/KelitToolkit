@@ -39,22 +39,83 @@ def origin_offset(obj, preset):
     return target
 
 
-def has_unapplied_transform(obj):
+def has_unapplied_transform(obj, world=False):
+    """Rotation or scale left on the object. `world` looks at the world
+    matrix instead: what the object will carry once its parent empties are
+    gone (the preview runs before that step)."""
+    if world:
+        _location, rotation, scale = obj.matrix_world.decompose()
+        return (any(abs(value - 1.0) > 1e-6 for value in scale)
+                or abs(rotation.angle) > 1e-6)
     return (any(abs(value - 1.0) > 1e-6 for value in obj.scale)
             or any(abs(value) > 1e-6 for value in obj.rotation_euler))
 
 
-def transform_refused(obj):
+def transform_refused(obj, world=False):
     """What the instance-safe applies skip: mirrored or zero scale."""
-    return min(obj.scale) < 0 or min(abs(value) for value in obj.scale) < 1e-6
+    if world:
+        scale = obj.matrix_world.to_scale()
+        mirrored = obj.matrix_world.to_3x3().determinant() < 0
+    else:
+        scale = obj.scale
+        mirrored = min(obj.scale) < 0
+    return mirrored or min(abs(value) for value in scale) < 1e-6
 
 
 class _Probe:
-    """Stand-in operator instance for the dry-run helpers of other operators."""
+    """Stand-in operator instance for the dry-run helpers of other operators
+    (their option values, plus the helper methods those helpers call)."""
     baked_positions = True
     compare_materials = 'CONTENT'
     preserve_camera_rig = True
     process_all = True
+    _ancestors = OBJECT_OT_delete_unused_empties._ancestors
+    _has_animation = OBJECT_OT_delete_unused_empties._has_animation
+    _driver_targets = OBJECT_OT_delete_unused_empties._driver_targets
+
+
+def compute_preview(context, pool, origin_preset):
+    """What each Auto Clean step would touch on `pool` (visible, editable
+    objects in scope). Read-only."""
+    meshes = [obj for obj in pool if obj.type == 'MESH' and obj.data]
+    probe = _Probe()
+    protected = OBJECT_OT_delete_unused_empties._protected_empties(probe, context)
+    empties = [obj for obj in pool if obj.type == 'EMPTY' and obj.name not in protected]
+    groups = OBJECT_OT_detect_and_replace_instances.find_duplicate_meshes(probe, meshes)
+    seen = set()
+    origins = 0
+    for obj in meshes:
+        if obj.data.name in seen:
+            continue
+        seen.add(obj.data.name)
+        if origin_offset(obj, origin_preset).length > 1e-4:
+            origins += 1
+    renames = 0
+    for obj in pool:
+        kind = obj.type if obj.type in ('LIGHT', 'CAMERA', 'ARMATURE') else 'MESH'
+        if normalize_name_for_unreal(obj.name, kind) != obj.name:
+            renames += 1
+        elif obj.type == 'MESH' and obj.data and obj.data.name != obj.name:
+            renames += 1
+    material_renames = sum(
+        1 for material in bpy.data.materials
+        if material.library is None
+        and normalize_name_for_unreal(material.name, 'MATERIAL') != material.name)
+    return {
+        'objects': len(pool),
+        'hidden': sum(1 for obj in context.scene.objects if not obj.visible_get()),
+        'materials': sum(len(group) - 1 for group in find_duplicate_materials()),
+        'empties': len(empties),
+        'empties_kept': len(protected),
+        'duplicates': sum(len(objs) - 1 for objs in groups.values()),
+        'transforms': sum(1 for obj in meshes
+                          if has_unapplied_transform(obj, world=True)
+                          and not transform_refused(obj, world=True)),
+        'transforms_refused': sum(1 for obj in meshes if transform_refused(obj, world=True)),
+        'origins': origins,
+        'renames': renames,
+        'material_renames': material_renames,
+    }
 
 
 class OBJECT_OT_auto_clean(bpy.types.Operator):
@@ -166,47 +227,7 @@ class OBJECT_OT_auto_clean(bpy.types.Operator):
         cached = getattr(self, '_preview_cache', None)
         if cached is not None and cached[0] == key:
             return cached[1]
-
-        pool = self._pool(context)
-        meshes = [obj for obj in pool if obj.type == 'MESH' and obj.data]
-        probe = _Probe()
-        protected = OBJECT_OT_delete_unused_empties._protected_empties(probe, context)
-        empties = [obj for obj in pool if obj.type == 'EMPTY' and obj.name not in protected]
-        groups = OBJECT_OT_detect_and_replace_instances.find_duplicate_meshes(probe, meshes)
-        seen = set()
-        origins = 0
-        for obj in meshes:
-            if obj.data.name in seen:
-                continue
-            seen.add(obj.data.name)
-            if origin_offset(obj, self.origin_preset).length > 1e-4:
-                origins += 1
-        renames = 0
-        for obj in pool:
-            kind = obj.type if obj.type in ('LIGHT', 'CAMERA', 'ARMATURE') else 'MESH'
-            if normalize_name_for_unreal(obj.name, kind) != obj.name:
-                renames += 1
-            elif obj.type == 'MESH' and obj.data and obj.data.name != obj.name:
-                renames += 1
-        material_renames = sum(
-            1 for material in bpy.data.materials
-            if material.library is None
-            and normalize_name_for_unreal(material.name, 'MATERIAL') != material.name)
-
-        preview = {
-            'objects': len(pool),
-            'hidden': sum(1 for obj in context.scene.objects if not obj.visible_get()),
-            'materials': sum(len(group) - 1 for group in find_duplicate_materials()),
-            'empties': len(empties),
-            'empties_kept': len(protected),
-            'duplicates': sum(len(objs) - 1 for objs in groups.values()),
-            'transforms': sum(1 for obj in meshes
-                              if has_unapplied_transform(obj) and not transform_refused(obj)),
-            'transforms_refused': sum(1 for obj in meshes if transform_refused(obj)),
-            'origins': origins,
-            'renames': renames,
-            'material_renames': material_renames,
-        }
+        preview = compute_preview(context, self._pool(context), self.origin_preset)
         self._preview_cache = (key, preview)
         return preview
 
