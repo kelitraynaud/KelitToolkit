@@ -59,6 +59,18 @@ class UnrealToolkitSettings(bpy.types.PropertyGroup):
     sync_key_mode: bpy.props.StringProperty(default='AUTHORED')
     sync_options_saved: bpy.props.BoolProperty(default=False)
 
+    # Last-used options of the Auto Clean dialog, same idea
+    auto_clean_scope: bpy.props.StringProperty(default='SCENE')
+    auto_clean_merge_materials: bpy.props.BoolProperty(default=True)
+    auto_clean_delete_empties: bpy.props.BoolProperty(default=True)
+    auto_clean_instance_duplicates: bpy.props.BoolProperty(default=True)
+    auto_clean_apply_transforms: bpy.props.BoolProperty(default=True)
+    auto_clean_set_origins: bpy.props.BoolProperty(default=True)
+    auto_clean_origin_preset: bpy.props.StringProperty(default='BOTTOM_CENTER')
+    auto_clean_normalize_names: bpy.props.BoolProperty(default=True)
+    auto_clean_validate: bpy.props.BoolProperty(default=True)
+    auto_clean_options_saved: bpy.props.BoolProperty(default=False)
+
 
 UPDATE_REPO_URL = "https://kelitraynaud.github.io/KelitToolkit/index.json"
 UPDATE_REPO_NAME = "Kelit Toolkit"

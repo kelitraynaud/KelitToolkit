@@ -13,9 +13,11 @@ from . import unified_export
 from . import unreal_link
 from . import usd_sync
 from . import ue_materials
+from . import auto_clean
 
 
 def register():
+    auto_clean.register()
     instances.register()
     origin.register()
     naming.register()
@@ -45,3 +47,4 @@ def unregister():
     naming.unregister()
     origin.unregister()
     instances.unregister()
+    auto_clean.unregister()

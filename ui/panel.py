@@ -86,6 +86,9 @@ from ..operators.usd_sync import (
 from ..operators.ue_materials import (
     UNREAL_OT_build_material_instances,
 )
+from ..operators.auto_clean import (
+    OBJECT_OT_auto_clean,
+)
 
 
 # ============================================================================
@@ -108,9 +111,11 @@ from ..operators import (
     unreal_link as _m_unreal_link,
     usd_sync as _m_usd_sync,
     ue_materials as _m_ue_materials,
+    auto_clean as _m_auto_clean,
 )
 
 SEARCH_SECTIONS = (
+    (_m_auto_clean, 'Clean · Auto Clean'),
     (_m_usd_sync, 'Send · USD'),
     (_m_unified_export, 'Send · Export'),
     (_m_unreal_link, 'Send · Unreal Link'),
@@ -353,6 +358,11 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
                                        "Clean & Check", 'BRUSH_DATA')
         if not expanded:
             return
+
+        row = box.row()
+        row.scale_y = 1.4
+        row.operator(OBJECT_OT_auto_clean.bl_idname, text="Auto Clean", icon='SHADERFX')
+        box.separator()
 
         box.label(text="Naming:")
         col = box.column(align=True)
