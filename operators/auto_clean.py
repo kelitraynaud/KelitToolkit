@@ -4,12 +4,17 @@ preview of what each step will touch and a single undo step."""
 import bpy
 import mathutils
 
-from ..utils import normalize_name_for_unreal
+from ..utils import mesh_users, normalize_name_for_unreal
 from .export import collect_validation_issues
 from .instances import OBJECT_OT_detect_and_replace_instances
 from .materials import find_duplicate_materials
 from .report import set_report, validation_lines
 from .scene_cleanup import OBJECT_OT_delete_unused_empties, ORGANIZATION_ITEMS
+from .split_merge import analyse_repeats, split_groups
+
+SPLIT_MIN_VERTICES = 24
+SPLIT_MIN_REPEATS = 2
+SPLIT_TOLERANCE = 0.005
 
 
 ORIGIN_PRESETS = [
@@ -106,7 +111,19 @@ def compute_preview(context, pool, origin_preset, organization='COLLECTIONS'):
         1 for material in bpy.data.materials
         if material.library is None
         and normalize_name_for_unreal(material.name, 'MATERIAL') != material.name)
+    rejoin = sum(len(members) for _base, members in split_groups(meshes))
+    repeats = 0
+    for obj in meshes:
+        if len(mesh_users(obj.data)) != 1:
+            continue
+        repeated, _units, bm = analyse_repeats(obj, SPLIT_MIN_VERTICES, SPLIT_MIN_REPEATS,
+                                               SPLIT_TOLERANCE)
+        if bm is not None:
+            bm.free()
+        repeats += sum(len(items) for _signature, items in repeated)
     return {
+        'rejoin': rejoin,
+        'repeats': repeats,
         'objects': len(pool),
         'hidden': sum(1 for obj in context.scene.objects if not obj.visible_get()),
         'materials': sum(len(group) - 1 for group in find_duplicate_materials()),
@@ -161,6 +178,19 @@ class OBJECT_OT_auto_clean(bpy.types.Operator):
         items=ORGANIZATION_ITEMS,
         default='COLLECTIONS'
     )
+    rejoin_splits: bpy.props.BoolProperty(
+        name="Rejoin Material Splits",
+        description="Objects an export cut into one object per material (Box074Material260, "
+                    "Box074Material310 ...) become one object with several slots again",
+        default=True
+    )
+    split_repeats: bpy.props.BoolProperty(
+        name="Split Repeated Parts",
+        description="Elements repeated inside one mesh (the same box 16 times) come out as "
+                    "instances of one shared mesh. Pieces that touch stay together; pieces "
+                    f"under {SPLIT_MIN_VERTICES} vertices are left alone",
+        default=True
+    )
     instance_duplicates: bpy.props.BoolProperty(
         name="Duplicates to Instances",
         description="Objects with the same shape, UVs and materials share one mesh "
@@ -198,8 +228,9 @@ class OBJECT_OT_auto_clean(bpy.types.Operator):
     )
 
     REMEMBERED_OPTIONS = ('scope', 'merge_materials', 'delete_empties', 'organization',
-                          'instance_duplicates', 'apply_transforms', 'set_origins',
-                          'origin_preset', 'normalize_names', 'validate')
+                          'rejoin_splits', 'split_repeats', 'instance_duplicates',
+                          'apply_transforms', 'set_origins', 'origin_preset',
+                          'normalize_names', 'validate')
 
     @classmethod
     def poll(cls, context):
@@ -280,6 +311,8 @@ class OBJECT_OT_auto_clean(bpy.types.Operator):
         row = layout.row()
         row.enabled = self.delete_empties
         row.prop(self, "organization")
+        step("rejoin_splits", f"{preview['rejoin']} part(s) to join")
+        step("split_repeats", f"{preview['repeats']} element(s) to extract")
         step("instance_duplicates", f"{preview['duplicates']} to instance")
         refused = (f", {preview['transforms_refused']} skipped (mirror or zero scale)"
                    if preview['transforms_refused'] else '')
@@ -329,6 +362,30 @@ class OBJECT_OT_auto_clean(bpy.types.Operator):
                 elif self.organization == 'PARENTS':
                     line += ", parent empties kept"
                 report.append(line)
+
+            if self.rejoin_splits:
+                meshes = self._meshes(context)
+                before = len(meshes)
+                if meshes:
+                    self._select(context, meshes)
+                    bpy.ops.kelit_toolkit.rejoin_material_splits('EXEC_DEFAULT',
+                                                                 search_scope='SELECTED')
+                if self._working_names is not None:
+                    self._working_names = {n for n in self._working_names if n in bpy.data.objects}
+                report.append(f"Material splits rejoined: {before - len(self._meshes(context))} part(s)")
+
+            if self.split_repeats:
+                meshes = self._meshes(context)
+                before_names = {obj.name for obj in bpy.data.objects}
+                if meshes:
+                    self._select(context, meshes)
+                    bpy.ops.kelit_toolkit.split_repeated_parts(
+                        'EXEC_DEFAULT', min_vertices=SPLIT_MIN_VERTICES,
+                        min_repeats=SPLIT_MIN_REPEATS, contact_tolerance=SPLIT_TOLERANCE)
+                new_names = {obj.name for obj in bpy.data.objects} - before_names
+                if self._working_names is not None:
+                    self._working_names |= new_names
+                report.append(f"Repeated parts extracted as instances: {len(new_names)}")
 
             if self.instance_duplicates:
                 meshes = self._meshes(context)

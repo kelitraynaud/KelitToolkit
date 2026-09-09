@@ -14,6 +14,10 @@ from ..operators.instances import (
     OBJECT_OT_realize_modifiers_to_instances,
     OBJECT_OT_apply_all_modifiers,
 )
+from ..operators.split_merge import (
+    OBJECT_OT_rejoin_material_splits,
+    OBJECT_OT_split_repeated_parts,
+)
 from ..operators.origin import (
     OBJECT_OT_set_origin_preset,
     OBJECT_OT_set_origin_custom,
@@ -112,10 +116,12 @@ from ..operators import (
     usd_sync as _m_usd_sync,
     ue_materials as _m_ue_materials,
     auto_clean as _m_auto_clean,
+    split_merge as _m_split_merge,
 )
 
 SEARCH_SECTIONS = (
     (_m_auto_clean, 'Clean · Auto Clean'),
+    (_m_split_merge, 'Prepare · Instances'),
     (_m_usd_sync, 'Send · USD'),
     (_m_unified_export, 'Send · Export'),
     (_m_unreal_link, 'Send · Unreal Link'),
@@ -315,6 +321,10 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
         col = box.column(align=True)
         col.operator(OBJECT_OT_detect_and_replace_instances.bl_idname,
                      text="Detect Duplicates > Instances", icon='VIEWZOOM')
+        col.operator(OBJECT_OT_rejoin_material_splits.bl_idname,
+                     text="Rejoin Material Splits", icon='OBJECT_DATA')
+        col.operator(OBJECT_OT_split_repeated_parts.bl_idname,
+                     text="Split Repeated Parts", icon='MOD_EXPLODE')
         col.operator(OBJECT_OT_replace_with_active_instance.bl_idname,
                      text="Replace with Active", icon='AUTOMERGE_ON')
         col.operator(OBJECT_OT_group_similar_in_collection.bl_idname,
