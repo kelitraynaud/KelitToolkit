@@ -158,10 +158,12 @@ Your import is at 0.01 scale (common with C4D/FBX round-trips). Run
 **Normalize Scene Scale** first: objects and cameras reach scale 1.0 at
 real size with the framing preserved.
 
-**Flat surfaces are invisible from one side, like inverted normals**
-Unreal's USD importer creates two-sided material instances but leaves the
-override off. Enable **Force Double-Sided Materials** in the sync options,
-only if you need it: double-sided shading costs performance.
+**The model looks see-through or inside-out in Unreal, fine in Blender**
+Two Blender defaults reach Unreal the wrong way: backface culling off makes
+every mesh double-sided, and anything plugged into Alpha makes Unreal build a
+translucent material that does not write depth. The sync options fix both:
+**Two-Sided** (single-sided by default) and **Alpha** (cutout by default,
+translucent only for materials set to Blended in Blender).
 
 **The camera arrives blurred**
 Unreal's CineCamera defaults to a 1 km manual focus. The sync mirrors

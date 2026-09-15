@@ -987,7 +987,85 @@ def export_skeletal_usd(filepath, asset):
 # USD EXPORT + KIND TAGGING
 # ============================================================================
 
-def export_usd_hierarchy(filepath, objects, export_materials=True):
+TWO_SIDED_ITEMS = [
+    ('OFF', "Single-sided (Unreal default)",
+     "Every mesh is exported single-sided. Blender's 'backface culling off' default "
+     "would otherwise make Unreal build a two-sided material for everything"),
+    ('BLENDER', "As in Blender",
+     "Materials with backface culling off become two-sided in Unreal, the others stay "
+     "single-sided"),
+    ('ON', "Two-sided everywhere",
+     "Every material two-sided. Costs performance; for flat, zero-thickness surfaces"),
+]
+
+ALPHA_MODE_ITEMS = [
+    ('AUTO', "Cutout (translucent only for Blended materials)",
+     "A material with something plugged into Alpha becomes a Masked material in Unreal "
+     "(opaque, depth-sorted, transparent where the alpha is black). Only Blender materials "
+     "set to Blended stay translucent"),
+    ('OPAQUE', "Ignore alpha",
+     "The Alpha input is dropped: every material is opaque in Unreal"),
+    ('TRANSLUCENT', "Translucent as exported",
+     "Unreal's default for USD opacity: translucent materials, no depth sorting"),
+]
+
+
+def apply_material_policies(filepath, alpha_mode='AUTO', two_sided='OFF', blended_names=()):
+    """Post-process the exported stage so Unreal builds the materials the
+    artist meant. Blender writes 'doubleSided' on every mesh whose material has
+    backface culling off (its default) and a plain 'opacity' input for any
+    Alpha link: Unreal then creates two-sided, translucent materials that do
+    not write depth, and the model looks like its normals are inverted."""
+    counts = {'single_sided': 0, 'double_sided': 0, 'masked': 0, 'opaque': 0}
+    try:
+        from pxr import Usd, UsdGeom, UsdShade, Sdf
+    except ImportError:
+        return counts
+
+    stage = Usd.Stage.Open(filepath)
+    blended = {name for name in blended_names} | {sanitize_prim_name(name) for name in blended_names}
+    # paths first: editing the stage while traversing it expires the prims
+    mesh_paths = [prim.GetPath() for prim in stage.Traverse() if prim.GetTypeName() == 'Mesh']
+    shader_paths = [prim.GetPath() for prim in stage.Traverse()
+                    if prim.GetTypeName() == 'Shader'
+                    and UsdShade.Shader(prim).GetIdAttr().Get() == 'UsdPreviewSurface']
+    changed = False
+    if two_sided != 'BLENDER':
+        wanted = two_sided == 'ON'
+        for path in mesh_paths:
+            attr = UsdGeom.Mesh(stage.GetPrimAtPath(path)).GetDoubleSidedAttr()
+            if bool(attr.Get()) != wanted:
+                attr.Set(wanted)
+                counts['double_sided' if wanted else 'single_sided'] += 1
+                changed = True
+    for path in shader_paths:
+        prim = stage.GetPrimAtPath(path)
+        shader = UsdShade.Shader(prim)
+        opacity = shader.GetInput('opacity')
+        if opacity is None or not opacity.HasConnectedSource():
+            continue
+        mode = alpha_mode
+        if mode == 'AUTO':
+            mode = 'TRANSLUCENT' if prim.GetParent().GetName() in blended else 'MASKED'
+        if mode == 'OPAQUE':
+            opacity.DisconnectSource()
+            opacity.Set(1.0)
+            counts['opaque'] += 1
+            changed = True
+        elif mode == 'MASKED':
+            threshold = shader.GetInput('opacityThreshold')
+            if not threshold:
+                threshold = shader.CreateInput('opacityThreshold', Sdf.ValueTypeNames.Float)
+            threshold.Set(0.5)
+            counts['masked'] += 1
+            changed = True
+    if changed:
+        stage.GetRootLayer().Save()
+    return counts
+
+
+def export_usd_hierarchy(filepath, objects, export_materials=True,
+                         alpha_mode='AUTO', two_sided='OFF'):
     """
     Export *objects* to .usda with hierarchy preserved, then inject USD 'kind'
     metadata so Unreal keeps each mesh as a separate static mesh on import.
@@ -996,6 +1074,7 @@ def export_usd_hierarchy(filepath, objects, export_materials=True):
     original_selection = [o for o in bpy.context.selected_objects]
     original_active = bpy.context.view_layer.objects.active
     materials = collect_materials(objects)
+    blended_names = []
 
     try:
         # three source-side quirks are neutralised for the duration of the
@@ -1014,6 +1093,10 @@ def export_usd_hierarchy(filepath, objects, export_materials=True):
                     pass  # object not in this view layer
             if objects:
                 bpy.context.view_layer.objects.active = objects[0]
+            # names as they are exported (inside the unique-name block), for
+            # the alpha policy: only Blended materials stay translucent
+            blended_names = [material.name for material in materials
+                             if surface_method(material)[1] in ('BLENDED', 'BLEND')]
 
             bpy.ops.wm.usd_export(
                 filepath=filepath,
@@ -1038,6 +1121,7 @@ def export_usd_hierarchy(filepath, objects, export_materials=True):
 
     tagged = inject_kind_metadata(filepath)
     asset_hints, data_hints = rename_mesh_prims_to_object_names(filepath)
+    tagged.update(apply_material_policies(filepath, alpha_mode, two_sided, blended_names))
     return tagged, asset_hints, data_hints
 
 
@@ -2251,13 +2335,18 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         default='AUTHORED'
     )
 
-    fix_two_sided: bpy.props.BoolProperty(
-        name="Force Double-Sided Materials",
-        description="Unreal creates '*_TwoSided' material instances for USD doubleSided "
-                    "meshes but leaves the override disabled, so they still render single-sided. "
-                    "Enable this only if flat, zero-thickness surfaces disappear - double-sided "
-                    "shading costs more and defeats some optimisations",
-        default=False
+    two_sided: bpy.props.EnumProperty(
+        name="Two-Sided",
+        description="Which materials render both faces in Unreal",
+        items=TWO_SIDED_ITEMS,
+        default='OFF'
+    )
+
+    alpha_mode: bpy.props.EnumProperty(
+        name="Alpha",
+        description="What Unreal does with materials that have something plugged into Alpha",
+        items=ALPHA_MODE_ITEMS,
+        default='AUTO'
     )
 
     @staticmethod
@@ -2321,7 +2410,7 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
     # dialog options remembered per scene (saved in execute, restored here)
     REMEMBERED_OPTIONS = (
         'source', 'place_in_level', 'replace_existing', 'import_materials',
-        'fix_two_sided', 'include_skeletal', 'include_animation',
+        'two_sided', 'alpha_mode', 'include_skeletal', 'include_animation',
         'include_camera', 'camera_spawnable', 'preserve_hierarchy', 'key_mode',
     )
 
@@ -2350,7 +2439,8 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         layout.prop(self, "replace_existing")
         layout.prop(self, "import_materials")
         if self.import_materials:
-            layout.prop(self, "fix_two_sided")
+            layout.prop(self, "two_sided")
+            layout.prop(self, "alpha_mode")
 
         layout.separator()
         layout.prop(self, "include_skeletal")
@@ -2448,7 +2538,13 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         if mesh_objects:
             try:
                 tagged, asset_hints, data_hints = export_usd_hierarchy(
-                    usd_path, objects, self.import_materials)
+                    usd_path, objects, self.import_materials,
+                    alpha_mode=self.alpha_mode, two_sided=self.two_sided)
+                policies = ", ".join(f"{tagged.get(key, 0)} {key.replace('_', ' ')}"
+                                     for key in ('single_sided', 'double_sided', 'masked', 'opaque')
+                                     if tagged.get(key))
+                if policies:
+                    print(f"[KelitToolkit] material policies: {policies}")
             except RuntimeError as error:
                 self.report({'ERROR'}, f"USD export failed: {error}")
                 return {'CANCELLED'}
@@ -2501,7 +2597,9 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
             'place_in_level': self.place_in_level,
             'replace_existing': self.replace_existing,
             'import_materials': self.import_materials,
-            'fix_two_sided': self.fix_two_sided,
+            # the Unreal-side repair of '*_TwoSided' instances only matters
+            # when some meshes are still exported double-sided
+            'fix_two_sided': self.two_sided != 'OFF',
             'objects': graph,
             'fps': scene.render.fps / max(scene.render.fps_base, 1e-6),
             'frame_start': scene.frame_start,

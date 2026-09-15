@@ -82,10 +82,14 @@ for name in op.REMEMBERED_OPTIONS:
     setattr(fake, name, 'SELECTED' if name == 'source' else True)
 fake.key_mode = 'BAKED'
 fake.preserve_hierarchy = False
+fake.two_sided = 'BLENDER'
+fake.alpha_mode = 'OPAQUE'
 op._remember_options(fake, bpy.context)
 t.check('options_saved', scene_settings.sync_options_saved
         and scene_settings.sync_key_mode == 'BAKED'
-        and scene_settings.sync_preserve_hierarchy is False)
+        and scene_settings.sync_preserve_hierarchy is False
+        and scene_settings.sync_two_sided == 'BLENDER'
+        and scene_settings.sync_alpha_mode == 'OPAQUE')
 
 # ---- native updates repository (restore prefs afterwards) ----
 repos = bpy.context.preferences.extensions.repos
