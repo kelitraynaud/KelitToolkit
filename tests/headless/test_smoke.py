@@ -205,4 +205,28 @@ t.check('materials_reassigned', all(
     material is not None and material.name == 'rooftop_01'
     for mesh in bpy.data.meshes for material in mesh.materials))
 
+# Send dialog, Collection mode without an 'Export' collection: the active
+# collection is used (it used to send nothing, silently)
+t.fresh_scene()
+vehicles = bpy.data.collections.new('Vehicles')
+bpy.context.scene.collection.children.link(vehicles)
+bpy.ops.mesh.primitive_cube_add()
+car = bpy.context.active_object
+for collection in list(car.users_collection):
+    collection.objects.unlink(car)
+vehicles.objects.link(car)
+bpy.context.view_layer.active_layer_collection = \
+    bpy.context.view_layer.layer_collection.children['Vehicles']
+t.deselect_all()
+usd_sync = t.submodule('operators.usd_sync')
+sync_op = usd_sync.UNREAL_OT_usd_scene_sync
+probe = type('Probe', (), {'source': 'EXPORT_COLLECTION',
+                           '_source_collection': staticmethod(sync_op._source_collection)})()
+base = usd_sync.UNREAL_OT_usd_scene_sync._base_objects(probe, bpy.context)
+t.check('send_collection_falls_back_to_active', [o.name for o in base] == [car.name])
+export = bpy.data.collections.new('Export')
+bpy.context.scene.collection.children.link(export)
+base = usd_sync.UNREAL_OT_usd_scene_sync._base_objects(probe, bpy.context)
+t.check('send_collection_prefers_export', list(base) == [])
+
 t.finish('SMOKE')

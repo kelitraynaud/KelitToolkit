@@ -2169,7 +2169,9 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         description="Which objects to send",
         items=[
             ('SELECTED', "Selection (+ parents/children)", "Selected objects, expanded to their full hierarchy"),
-            ('EXPORT_COLLECTION', "Export Collection", "Everything in the 'Export' collection"),
+            ('EXPORT_COLLECTION', "Collection",
+             "Everything in the 'Export' collection when the file has one, otherwise "
+             "in the collection active in the Outliner"),
         ],
         default='SELECTED'
     )
@@ -2258,10 +2260,21 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         default=False
     )
 
+    @staticmethod
+    def _source_collection(context):
+        """The collection the Collection mode sends: 'Export' when the file
+        has one, otherwise the collection active in the Outliner. Returning
+        nothing when there was no 'Export' collection left the dialog at
+        '0 mesh(es)' with no way to see why."""
+        export_collection = bpy.data.collections.get('Export')
+        if export_collection is not None:
+            return export_collection
+        active = context.view_layer.active_layer_collection
+        return active.collection if active is not None else context.scene.collection
+
     def _base_objects(self, context):
         if self.source == 'EXPORT_COLLECTION':
-            export_collection = bpy.data.collections.get('Export')
-            return list(export_collection.all_objects) if export_collection else []
+            return list(self._source_collection(context).all_objects)
         base = list(context.selected_objects)
         if not base:
             export_collection = bpy.data.collections.get('Export')
@@ -2355,9 +2368,17 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
 
         summary = self._dialog_summary(context)
         box = layout.box()
+        if self.source == 'EXPORT_COLLECTION':
+            collection = self._source_collection(context)
+            origin = ("'Export' collection" if collection.name == 'Export'
+                      else f"active collection '{collection.name}'")
+            box.label(text=f"From the {origin}", icon='OUTLINER_COLLECTION')
         box.label(text=f"{summary['mesh_count']} mesh(es), "
                        f"{summary['empty_count']} empty/null(s)",
                   icon='OUTLINER_COLLECTION')
+        if summary['mesh_count'] == 0 and self.source == 'EXPORT_COLLECTION':
+            box.label(text="Empty: click another collection in the Outliner, or use Selection",
+                      icon='ERROR')
         if summary['skeletal_names']:
             names = ", ".join(summary['skeletal_names'][:3])
             box.label(text=f"{len(summary['skeletal_names'])} skeletal: {names}",
@@ -2404,7 +2425,12 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
             skeletal_assets, objects = split_skeletal_assets(objects)
         mesh_objects = [o for o in objects if o.type == 'MESH']
         if not mesh_objects and not skeletal_assets:
-            self.report({'WARNING'}, "No mesh objects to send")
+            if self.source == 'EXPORT_COLLECTION':
+                self.report({'WARNING'},
+                            f"Nothing to send in collection '{self._source_collection(context).name}': "
+                            "click another collection in the Outliner, or use Selection")
+            else:
+                self.report({'WARNING'}, "Nothing to send: select mesh objects first")
             return {'CANCELLED'}
 
         settings = context.scene.kelit_toolkit_settings

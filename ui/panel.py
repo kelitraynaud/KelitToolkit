@@ -246,7 +246,7 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
 
         sub = box.box()
         sub.label(text="Static + Skeletal (anim) auto-detected", icon='INFO')
-        sub.label(text="Sends the selection ('Export' collection if empty)")
+        sub.label(text="Sends the selection, or a collection (see the dialog)")
 
         box.prop(settings, "usd_content_folder")
 
