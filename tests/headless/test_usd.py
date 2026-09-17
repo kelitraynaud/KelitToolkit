@@ -128,6 +128,15 @@ t.check('textures_exported_with_usage', len(textures) == 2
         and sorted(usages.values()) == ['color', 'linear']
         and all(os.path.isfile(entry['file']) for entry in textures), usages)
 
+# texture names mirror Unreal's: no extra underscore for digit-leading files
+digit_image = bpy.data.images.new('25736b_R_Tuk_Tuk_Roughness.png', 4, 4)
+t.check('texture_name_digit_stem',
+        usd_sync.unreal_texture_name(digit_image) == 'T_25736b_R_Tuk_Tuk_Roughness',
+        usd_sync.unreal_texture_name(digit_image))
+white = ue_materials.write_linear_white(os.path.join(folder, 'textures'))
+t.check('linear_white_written', os.path.isfile(white)
+        and bpy.data.images.get('T_B2UE_LinearWhite') is None)
+
 script = ue_materials.MATERIAL_SCRIPT.replace('__PAYLOAD__', json.dumps(json.dumps({'x': "it's"})))
 try:
     compile(script, 'b2ue_materials', 'exec')

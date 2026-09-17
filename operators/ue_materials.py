@@ -61,6 +61,8 @@ def export_material_textures(records, out_dir):
     wanted = {}
     for key, usage in CHANNEL_USAGE:   # normal first: the strictest usage wins
         for record in records.values():
+            if key == 'emissive' and not record.get('emissive_strength'):
+                continue   # plugged in but switched off: nothing to import
             data = record.get(key)
             if data and 'texture' in data:
                 wanted.setdefault(data['texture'], (data['image'], usage))
@@ -79,6 +81,23 @@ def export_material_textures(records, out_dir):
             continue
         exported.append({'name': ue_name, 'file': path.replace('\\', '/'), 'usage': usage})
     return exported
+
+
+def write_linear_white(out_dir):
+    """4x4 white PNG, the default texture of the master's linear samplers
+    (imported in Unreal with sRGB off; the engine's white square is sRGB and
+    makes a Linear Color sampler fail to compile)."""
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, 'T_B2UE_LinearWhite.png')
+    if not os.path.isfile(path):
+        image = bpy.data.images.new('T_B2UE_LinearWhite', 4, 4, alpha=False)
+        try:
+            image.pixels = [1.0] * (4 * 4 * 4)
+            image.file_format = 'PNG'
+            image.save(filepath=path)
+        finally:
+            bpy.data.images.remove(image)
+    return path.replace('\\', '/')
 
 
 def apply_material_policies_to_records(records, two_sided='OFF', alpha_mode='AUTO'):
@@ -120,6 +139,11 @@ TOOLS = unreal.AssetToolsHelpers.get_asset_tools()
 WHITE = "/Engine/EngineResources/WhiteSquareTexture"
 FLAT_NORMAL = "/Engine/EngineMaterials/DefaultNormal"
 LINEAR = unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR
+# default of the LINEAR samplers: the engine's white square is sRGB, and a
+# Linear Color sampler pointing at an sRGB texture does not compile (the whole
+# material then falls back to the grey default). The add-on ships its own.
+LINEAR_WHITE = PAYLOAD["linear_white"]["path"]
+MASTER_VERSION = 2.0
 
 
 def log(message):
@@ -171,7 +195,7 @@ def add_opacity(material, uv=None):
     """Opacity block: a map (red channel) or a value, wired to both Opacity
     and Opacity Mask. Which one counts is the instance's blend mode."""
     _node, texture_param, scalar, _vector, switch = helpers(material)
-    opacity_map = texture_param("OpacityMap", -1000, 1900, WHITE, "06 - Opacity", LINEAR)
+    opacity_map = texture_param("OpacityMap", -1000, 1900, LINEAR_WHITE, "06 - Opacity", LINEAR)
     if uv is not None:
         MEL.connect_material_expressions(uv, "", opacity_map, "UVs")
     opacity_value = scalar("Opacity", 1.0, -1000, 2120, "06 - Opacity")
@@ -182,11 +206,39 @@ def add_opacity(material, uv=None):
     MEL.connect_material_property(opacity_switch, "", unreal.MaterialProperty.MP_OPACITY)
 
 
-def build_master(path):
-    """Create the single-layer master material: one map or one value per channel."""
-    folder, name = path.rsplit("/", 1)
-    material = TOOLS.create_asset(name, folder, unreal.Material, unreal.MaterialFactoryNew())
+def ensure_linear_white():
+    """Import the add-on's linear white texture next to the master (once)."""
+    info = PAYLOAD["linear_white"]
+    if not EAL.does_asset_exist(info["path"]):
+        folder, name = info["path"].rsplit("/", 1)
+        task = unreal.AssetImportTask()
+        task.filename = info["file"]
+        task.destination_path = folder
+        task.destination_name = name
+        task.automated = True
+        task.replace_existing = True
+        task.save = True
+        TOOLS.import_asset_tasks([task])
+    texture = EAL.load_asset(info["path"])
+    if texture is not None and texture.get_editor_property("srgb"):
+        texture.set_editor_property("srgb", False)
+        EAL.save_asset(info["path"], only_if_is_dirty=False)
+    return texture
+
+
+def build_master(path, existing=None):
+    """Create the single-layer master material: one map or one value per
+    channel. `existing` rebuilds an older master in place (same asset, so
+    every instance keeps its parent)."""
+    ensure_linear_white()
+    if existing is not None:
+        material = existing
+        MEL.delete_all_material_expressions(material)
+    else:
+        folder, name = path.rsplit("/", 1)
+        material = TOOLS.create_asset(name, folder, unreal.Material, unreal.MaterialFactoryNew())
     node, texture_param, scalar, vector, switch = helpers(material)
+    scalar("B2UE_MasterVersion", MASTER_VERSION, -1500, -300, "99 - Internal")
 
     # --- shared UVs -------------------------------------------------------
     tex_coord = node(unreal.MaterialExpressionTextureCoordinate, -1500, 0)
@@ -211,7 +263,7 @@ def build_master(path):
     MEL.connect_material_property(base_switch, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
     # --- roughness / metallic --------------------------------------------
-    rough_map = texture_param("RoughnessMap", -1000, -150, WHITE, "02 - Surface", LINEAR)
+    rough_map = texture_param("RoughnessMap", -1000, -150, LINEAR_WHITE, "02 - Surface", LINEAR)
     wire_uv(rough_map)
     rough_value = scalar("Roughness", 0.5, -1000, 60, "02 - Surface")
     rough_switch = switch("UseRoughnessMap", False, -450, -120, "02 - Surface")
@@ -219,7 +271,7 @@ def build_master(path):
     MEL.connect_material_expressions(rough_value, "", rough_switch, "False")
     MEL.connect_material_property(rough_switch, "", unreal.MaterialProperty.MP_ROUGHNESS)
 
-    metal_map = texture_param("MetallicMap", -1000, 220, WHITE, "02 - Surface", LINEAR)
+    metal_map = texture_param("MetallicMap", -1000, 220, LINEAR_WHITE, "02 - Surface", LINEAR)
     wire_uv(metal_map)
     metal_value = scalar("Metallic", 0.0, -1000, 430, "02 - Surface")
     metal_switch = switch("UseMetallicMap", False, -450, 250, "02 - Surface")
@@ -252,7 +304,7 @@ def build_master(path):
     MEL.connect_material_property(emissive, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
 
     # --- displacement, ready for Nanite tessellation later ----------------
-    disp_map = texture_param("DisplacementMap", -1000, 1500, WHITE, "05 - Displacement", LINEAR)
+    disp_map = texture_param("DisplacementMap", -1000, 1500, LINEAR_WHITE, "05 - Displacement", LINEAR)
     wire_uv(disp_map)
     disp_scale = scalar("DisplacementScale", 0.0, -1000, 1700, "05 - Displacement")
     disp = node(unreal.MaterialExpressionMultiply, -450, 1550)
@@ -298,12 +350,15 @@ try:
     master_path = PAYLOAD["master_path"]
     if EAL.does_asset_exist(master_path):
         master = EAL.load_asset(master_path)
-        names = [str(name) for name in MEL.get_texture_parameter_names(master)]
-        if "OpacityMap" not in names:
-            # master built by an older version: give it the opacity block
-            add_opacity(master)
-            MEL.recompile_material(master)
-            EAL.save_asset(master_path, only_if_is_dirty=False)
+        try:
+            version = MEL.get_material_default_scalar_parameter_value(master, "B2UE_MasterVersion")
+        except Exception:
+            version = 0.0
+        if version < MASTER_VERSION:
+            # master built by an older version (no opacity, or linear
+            # samplers defaulting to an sRGB texture, which does not
+            # compile): rebuilt in place, the instances keep their parent
+            master = build_master(master_path, existing=master)
             result["master_upgraded"] = True
         log("reusing master %s" % master_path)
     else:
@@ -524,8 +579,13 @@ def build_material_instances(context, objects, two_sided='OFF', alpha_mode='AUTO
     records = apply_material_policies_to_records(
         extract_material_data(materials), two_sided, alpha_mode)
     texture_dir = os.path.join(get_staging_dir(), 'b2ue_textures', scene_name)
+    master_path = (settings.ue_master_material or '/Game/BlenderSync/M_B2UE_Master').rstrip('/')
     payload = {
-        'master_path': (settings.ue_master_material or '/Game/BlenderSync/M_B2UE_Master').rstrip('/'),
+        'master_path': master_path,
+        'linear_white': {
+            'file': write_linear_white(texture_dir),
+            'path': master_path.rsplit('/', 1)[0] + '/T_B2UE_LinearWhite',
+        },
         'instance_folder': f'{scene_folder}/MaterialInstances',
         'texture_folder': f'{scene_folder}/Textures',
         'fallback_texture_folders': [scene_folder, content_root],

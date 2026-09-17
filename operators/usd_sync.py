@@ -189,7 +189,10 @@ def is_exportable(obj):
 def unreal_texture_name(image):
     """Mirror the asset name Unreal's USD import gives an imported texture."""
     stem = os.path.splitext(os.path.basename(image.name))[0]
-    return 'T_' + sanitize_prim_name(stem)
+    # sanitized as a whole: a stem starting with a digit must not get the
+    # leading underscore prim names need ('T__2573...' duplicated the
+    # 'T_2573...' asset Unreal already had)
+    return sanitize_prim_name('T_' + stem)
 
 
 def resolve_bsdf_input(socket, depth=0):
