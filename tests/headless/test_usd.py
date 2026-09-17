@@ -101,4 +101,38 @@ tagged, meshes, shaders = export(two_sided='BLENDER', alpha_mode='TRANSLUCENT')
 t.check('blender_policy_untouched', tagged.get('single_sided', 0) == 0
         and tagged.get('masked', 0) == 0 and tagged.get('opaque', 0) == 0)
 
+# ---- master material bridge: records, policies, textures, script ----
+import json  # noqa: E402
+ue_materials = t.submodule('operators.ue_materials')
+records = usd_sync.extract_material_data([cutout, glass])
+t.check('records_have_opacity', 'texture' in records['M_Cutout'].get('opacity', {})
+        and records['M_Glass']['blended'] is True and records['M_Cutout']['blended'] is False
+        and records['M_Cutout']['backface_culling'] is False)
+
+policies = ue_materials.apply_material_policies_to_records(
+    usd_sync.extract_material_data([cutout, glass]), 'OFF', 'AUTO')
+t.check('policy_auto', policies['M_Cutout']['blend'] == 'MASKED'
+        and policies['M_Glass']['blend'] == 'TRANSLUCENT'
+        and policies['M_Cutout']['two_sided'] is False)
+policies = ue_materials.apply_material_policies_to_records(
+    usd_sync.extract_material_data([cutout, glass]), 'BLENDER', 'OPAQUE')
+t.check('policy_opaque_blender_sides', policies['M_Cutout']['blend'] is None
+        and 'opacity' not in policies['M_Cutout'] and policies['M_Cutout']['two_sided'] is True)
+
+textures = ue_materials.export_material_textures(
+    ue_materials.apply_material_policies_to_records(
+        usd_sync.extract_material_data([cutout]), 'OFF', 'AUTO'),
+    os.path.join(folder, 'textures'))
+usages = {entry['name']: entry['usage'] for entry in textures}
+t.check('textures_exported_with_usage', len(textures) == 2
+        and sorted(usages.values()) == ['color', 'linear']
+        and all(os.path.isfile(entry['file']) for entry in textures), usages)
+
+script = ue_materials.MATERIAL_SCRIPT.replace('__PAYLOAD__', json.dumps(json.dumps({'x': "it's"})))
+try:
+    compile(script, 'b2ue_materials', 'exec')
+    t.check('material_script_compiles', True)
+except SyntaxError as error:
+    t.check('material_script_compiles', False, str(error))
+
 t.finish('USD')

@@ -50,6 +50,7 @@ class UnrealToolkitSettings(bpy.types.PropertyGroup):
     sync_place_in_level: bpy.props.BoolProperty(default=True)
     sync_replace_existing: bpy.props.BoolProperty(default=True)
     sync_import_materials: bpy.props.BoolProperty(default=True)
+    sync_material_source: bpy.props.StringProperty(default='MASTER')
     sync_two_sided: bpy.props.StringProperty(default='OFF')
     sync_alpha_mode: bpy.props.StringProperty(default='AUTO')
     sync_include_skeletal: bpy.props.BoolProperty(default=True)

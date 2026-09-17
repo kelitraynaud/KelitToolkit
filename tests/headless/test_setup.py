@@ -84,6 +84,7 @@ fake.key_mode = 'BAKED'
 fake.preserve_hierarchy = False
 fake.two_sided = 'BLENDER'
 fake.alpha_mode = 'OPAQUE'
+fake.material_source = 'USD'
 op._remember_options(fake, bpy.context)
 t.check('options_saved', scene_settings.sync_options_saved
         and scene_settings.sync_key_mode == 'BAKED'

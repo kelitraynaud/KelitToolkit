@@ -360,6 +360,16 @@ def extract_material_data(materials):
         strength = bsdf.inputs.get('Emission Strength')
         if strength is not None and not strength.is_linked:
             record['emissive_strength'] = round(float(strength.default_value), 4)
+
+        # transparency: what feeds Alpha (ignored when it is the parasitic
+        # copy of the base colour map), whether the artist asked for real
+        # blending, and the face culling flag
+        if not record['had_parasitic_alpha']:
+            opacity = resolve_bsdf_input(bsdf.inputs.get('Alpha'))
+            if opacity:
+                record['opacity'] = opacity
+        record['blended'] = surface_method(material)[1] in ('BLENDED', 'BLEND')
+        record['backface_culling'] = bool(material.use_backface_culling)
         records[material.name] = record
     return records
 
@@ -2275,8 +2285,21 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
 
     import_materials: bpy.props.BoolProperty(
         name="Import Materials",
-        description="Import the USD materials (better fidelity than FBX)",
+        description="Also bring the materials. Untick to send geometry only",
         default=True
+    )
+
+    material_source: bpy.props.EnumProperty(
+        name="Materials",
+        description="Which materials Unreal ends up with",
+        items=[
+            ('MASTER', "Kelit master material",
+             "One readable master material in your project (path in Advanced), one instance "
+             "per Blender material with its textures, assigned to the sent meshes"),
+            ('USD', "Unreal USD materials",
+             "The UsdPreviewSurface instances Unreal's USD importer builds on its own"),
+        ],
+        default='MASTER'
     )
 
     include_skeletal: bpy.props.BoolProperty(
@@ -2410,7 +2433,7 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
     # dialog options remembered per scene (saved in execute, restored here)
     REMEMBERED_OPTIONS = (
         'source', 'place_in_level', 'replace_existing', 'import_materials',
-        'two_sided', 'alpha_mode', 'include_skeletal', 'include_animation',
+        'material_source', 'two_sided', 'alpha_mode', 'include_skeletal', 'include_animation',
         'include_camera', 'camera_spawnable', 'preserve_hierarchy', 'key_mode',
     )
 
@@ -2439,6 +2462,7 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         layout.prop(self, "replace_existing")
         layout.prop(self, "import_materials")
         if self.import_materials:
+            layout.prop(self, "material_source")
             layout.prop(self, "two_sided")
             layout.prop(self, "alpha_mode")
 
@@ -2596,7 +2620,9 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
             'outliner_folder': scene_name,
             'place_in_level': self.place_in_level,
             'replace_existing': self.replace_existing,
-            'import_materials': self.import_materials,
+            # with the master material, Unreal's own USD materials are not
+            # imported at all: the instances are built right after the sync
+            'import_materials': self.import_materials and self.material_source == 'USD',
             # the Unreal-side repair of '*_TwoSided' instances only matters
             # when some meshes are still exported double-sided
             'fix_two_sided': self.two_sided != 'OFF',
@@ -2709,6 +2735,15 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
             if missing:
                 message += f" - {len(missing)} mesh(es) not matched (see console)"
                 print(f"USD Scene Sync - unmatched meshes: {missing}")
+            if self.import_materials and self.material_source == 'MASTER' and mesh_objects:
+                self._step(context, wm, 95, "building the material instances...")
+                from .ue_materials import build_material_instances
+                built, material_message, _data = build_material_instances(
+                    context, objects, two_sided=self.two_sided, alpha_mode=self.alpha_mode)
+                message += " - " + material_message
+                if not built:
+                    self.report({'WARNING'}, message)
+                    return {'FINISHED'}
             self.report({'INFO'}, message)
         else:
             self.report({'INFO'}, f"Sync sent ({len(mesh_objects)} meshes, "
