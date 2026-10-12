@@ -15,12 +15,12 @@ blender_version_min = "5.0.0"
 license = ["SPDX:GPL-3.0-or-later"]
 copyright = [
   "2026 Kélit Raynaud",
-  "Epic Games, Inc. - dependencies/remote_execution.py, MIT (see dependencies/LICENSE-BlenderTools.txt)",
+  "2022 Epic Games, Inc. (dependencies/remote_execution.py, MIT, see dependencies/LICENSE-BlenderTools.txt)",
 ]
 
 [permissions]
-network = "Sends Python commands to the local Unreal Editor (remote execution, localhost)"
-files = "Exports USD/FBX files and can fix the Unreal project's configuration files"
+network = "Sends Python commands to the local Unreal Editor"
+files = "Exports USD/FBX files, can fix Unreal project config files"
 
 [build]
 paths_exclude_pattern = [
