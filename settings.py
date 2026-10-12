@@ -26,6 +26,10 @@ class UnrealToolkitSettings(bpy.types.PropertyGroup):
         default=""
     )
 
+    ue_target_project: bpy.props.StringProperty(
+        name="Unreal Destination", default="",
+        description="Selected running Unreal project. Empty means automatic only when one editor is open")
+
     ue_master_material: bpy.props.StringProperty(
         name="Master Material",
         description="Unreal master material the generated material instances are parented to. "
@@ -54,6 +58,7 @@ class UnrealToolkitSettings(bpy.types.PropertyGroup):
     sync_two_sided: bpy.props.StringProperty(default='OFF')
     sync_alpha_mode: bpy.props.StringProperty(default='AUTO')
     sync_include_skeletal: bpy.props.BoolProperty(default=True)
+    sync_include_skeletal_animation: bpy.props.BoolProperty(default=True)
     sync_include_animation: bpy.props.BoolProperty(default=False)
     sync_include_camera: bpy.props.BoolProperty(default=True)
     sync_camera_spawnable: bpy.props.BoolProperty(default=True)
@@ -126,10 +131,13 @@ class PREFERENCES_OT_setup_update_repo(bpy.types.Operator):
             repo.use_remote_url = True
         repo.remote_url = UPDATE_REPO_URL
 
-        try:
-            bpy.ops.wm.save_userpref()
-        except Exception:
-            pass
+        # never from a factory-startup or background session: saving there
+        # would replace the user's preferences with factory ones
+        if not (bpy.app.factory_startup or bpy.app.background):
+            try:
+                bpy.ops.wm.save_userpref()
+            except Exception:
+                pass
         # first sync so the extension shows up right away (needs network)
         try:
             bpy.ops.extensions.repo_sync_all()

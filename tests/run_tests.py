@@ -36,9 +36,15 @@ def run_headless(blender, script):
     report_path = os.path.join(tempfile.gettempdir(), f'kelit_{os.path.basename(script)}.json')
     if os.path.exists(report_path):
         os.remove(report_path)
+    # the tests run against a throwaway config folder: a test that saves the
+    # preferences (registering the update repository does) must never write
+    # the user's real userpref.blend. With --factory-startup it once replaced
+    # it with factory settings, every add-on disabled.
+    env = dict(os.environ)
+    env['BLENDER_USER_CONFIG'] = tempfile.mkdtemp(prefix='kelit_test_config_')
     process = subprocess.run(
-        [blender, '-b', '--python', script, '--', report_path],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=900)
+        [blender, '-b', '--factory-startup', '--python', script, '--', report_path],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=900, env=env)
     if os.path.exists(report_path):
         with open(report_path, encoding='utf-8') as handle:
             return json.load(handle), process.stdout
@@ -46,7 +52,27 @@ def run_headless(blender, script):
             'crash': process.stdout[-1500:]}, process.stdout
 
 
+def backup_real_preferences():
+    """Second safety net: copy the user's preferences aside before every
+    run, so even an unforeseen write could be undone."""
+    import shutil
+    import time
+    appdata = os.environ.get('APPDATA', '')
+    root = os.path.join(appdata, 'Blender Foundation', 'Blender')
+    if not os.path.isdir(root):
+        return
+    backup_dir = os.path.join(tempfile.gettempdir(), 'kelit_userpref_backups',
+                              time.strftime('%Y%m%d_%H%M%S'))
+    for version in os.listdir(root):
+        source = os.path.join(root, version, 'config', 'userpref.blend')
+        if os.path.isfile(source):
+            target = os.path.join(backup_dir, version)
+            os.makedirs(target, exist_ok=True)
+            shutil.copy2(source, target)
+
+
 def main(argv):
+    backup_real_preferences()
     quick = '--quick' in argv
     pure_only = '--pure' in argv
     all_ok = True

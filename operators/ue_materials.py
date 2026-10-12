@@ -16,8 +16,10 @@ and translucent materials. Adding displacement/tessellation later means
 editing the master once - every instance inherits it.
 """
 
+import hashlib
 import json
 import os
+import time
 
 import bpy
 
@@ -31,6 +33,8 @@ from .usd_sync import (
     get_staging_dir,
     is_exportable,
     sanitize_prim_name,
+    unreal_texture_name,
+    split_skeletal_assets,
 )
 
 # how Unreal must treat each channel's texture: colour maps stay sRGB, data
@@ -44,6 +48,128 @@ CHANNEL_USAGE = (
     ('base_color', 'color'),
     ('emissive', 'color'),
 )
+
+
+_ALPHA_EXPORT_CACHE = {}
+_TEXTURE_EXPORT_CACHE = {}
+
+
+def file_stamp(path):
+    try:
+        stat = os.stat(path)
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return None
+
+
+def export_texture_copy(image, path, extract_alpha=False):
+    """Reuse clean image exports; hash actual output to detect edits in Unreal.
+
+    File timestamps only validate this session's disk cache. The persistent
+    Unreal identity is the file content hash, so rewriting identical pixels
+    does not trigger reimports, including after restarting Blender.
+    """
+    path = os.path.normcase(os.path.abspath(path))
+    source = bpy.path.abspath(image.filepath, library=image.library)
+    packed = image.packed_file
+    def signature():
+        return (image.as_pointer(), tuple(image.size), image.channels,
+                image.alpha_mode, image.file_format, image.colorspace_settings.name,
+                source, file_stamp(source), packed.as_pointer() if packed else None,
+                packed.size if packed else None, extract_alpha)
+    previous = _TEXTURE_EXPORT_CACHE.get(path)
+    output_stamp = file_stamp(path)
+    if (image.source == 'FILE' and not image.is_dirty and output_stamp is not None
+            and previous and previous[:2] == (signature(), output_stamp)):
+        return previous[2]
+    if extract_alpha in {'R', 'G', 'B'}:
+        write_scalar_channel(image, path, extract_alpha)
+    elif extract_alpha:
+        write_alpha_mask(image, path)
+    else:
+        image.save(filepath=path, save_copy=True)
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    content_hash = digest.hexdigest()
+    _TEXTURE_EXPORT_CACHE[path] = (signature(), file_stamp(path), content_hash)
+    return content_hash
+
+
+def write_scalar_channel(image, path, channel):
+    """Unpack RGB scalar maps without altering the artist's master graph."""
+    import numpy as np
+    width, height = image.size
+    if not width or not height:
+        raise RuntimeError('Image has no pixels: ' + image.name)
+    pixels = np.empty(width*height*4, dtype=np.float32)
+    image.pixels.foreach_get(pixels)
+    rgba = pixels.reshape(-1, 4)
+    values = rgba[:, 'RGB'.index(channel)].copy()
+    if image.colorspace_settings.name == 'sRGB' and not image.is_float:
+        values = np.where(values <= .04045, values / 12.92, ((values + .055) / 1.055)**2.4)
+    rgba[:, :3] = values[:, None]
+    rgba[:, 3] = 1
+    output = bpy.data.images.new('B2UE_ChannelExport', width, height, alpha=False)
+    try:
+        output.colorspace_settings.name = 'Non-Color'
+        output.pixels.foreach_set(pixels)
+        output.file_format = 'PNG'
+        output.save(filepath=path)
+    finally:
+        bpy.data.images.remove(output)
+
+
+def write_alpha_mask(image, path):
+    """Extract Alpha to a linear grayscale texture for the existing master.
+
+    No change to the source image or master graph. Clean images can reuse an
+    extraction within this Blender session; painted/dirty images always run.
+    Pixel transfer uses NumPy/foreach rather than Python loops.
+    """
+    import numpy as np
+
+    path = os.path.normcase(os.path.abspath(path))
+
+    def stamp(filename):
+        try:
+            stat = os.stat(filename)
+            return stat.st_mtime_ns, stat.st_size
+        except OSError:
+            return None
+
+    source = bpy.path.abspath(image.filepath, library=image.library)
+    packed = image.packed_file
+    signature = (image.as_pointer(), tuple(image.size), image.alpha_mode,
+                 image.colorspace_settings.name, source, stamp(source),
+                 packed.as_pointer() if packed else None,
+                 packed.size if packed else None)
+    previous = _ALPHA_EXPORT_CACHE.get(path)
+    output_stamp = stamp(path)
+    if (image.source == 'FILE' and not image.is_dirty and output_stamp is not None
+            and previous == (signature, output_stamp)):
+        return False
+
+    width, height = image.size
+    if not width or not height or image.channels != 4:
+        raise RuntimeError('Alpha source %s must be a loaded RGBA image' % image.name)
+    pixels = np.empty(width * height * 4, dtype=np.float32)
+    image.pixels.foreach_get(pixels)
+    rgba = pixels.reshape((-1, 4))
+    alpha = rgba[:, 3].copy()
+    rgba[:, :3] = alpha[:, None]
+    rgba[:, 3] = 1.0
+    mask = bpy.data.images.new('B2UE_AlphaExport', width, height, alpha=False)
+    try:
+        mask.colorspace_settings.name = 'Non-Color'
+        mask.pixels.foreach_set(pixels)
+        mask.file_format = 'PNG'
+        mask.save(filepath=path)
+    finally:
+        bpy.data.images.remove(mask)
+    _ALPHA_EXPORT_CACHE[path] = (signature, stamp(path))
+    return True
 
 
 def export_material_textures(records, out_dir):
@@ -65,21 +191,36 @@ def export_material_textures(records, out_dir):
                 continue   # plugged in but switched off: nothing to import
             data = record.get(key)
             if data and 'texture' in data:
-                wanted.setdefault(data['texture'], (data['image'], usage))
+                channel = data.get('channel')
+                extract_alpha = True if key == 'opacity' and channel == 'Alpha' else (channel if channel in {'R','G','B'} else False)
+                if extract_alpha:
+                    image = bpy.data.images.get(data['image'])
+                    if image is None:
+                        raise RuntimeError('Missing alpha source: ' + data['image'])
+                    suffix = '_B2UE_AlphaMask' if extract_alpha is True else '_B2UE_' + extract_alpha
+                    data['texture'] = unreal_texture_name(image) + suffix
+                wanted.setdefault(data['texture'], (data['image'], usage, extract_alpha))
 
     exported = []
-    for ue_name, (image_name, usage) in sorted(wanted.items()):
+    for ue_name, (image_name, usage, extract_alpha) in sorted(wanted.items()):
         image = bpy.data.images.get(image_name)
         if image is None:
             continue
         path = os.path.join(out_dir, ue_name + '.png')
         try:
             # save_copy leaves the datablock's own filepath/format alone
-            image.save(filepath=path, save_copy=True)
+            content_hash = export_texture_copy(image, path, extract_alpha)
         except (RuntimeError, OSError) as error:
+            if extract_alpha:
+                raise RuntimeError('Could not export opacity for %s: %s' % (image_name, error)) from error
             print(f"Build Material Instances - could not write {ue_name}: {error}")
             continue
-        exported.append({'name': ue_name, 'file': path.replace('\\', '/'), 'usage': usage})
+        entry = {'name': ue_name, 'file': path.replace('\\', '/'), 'usage': usage,
+                 'content_hash': content_hash}
+        if extract_alpha:
+            stat = os.stat(path)
+            entry['alpha_stamp'] = '%s:%s' % (stat.st_mtime_ns, stat.st_size)
+        exported.append(entry)
     return exported
 
 
@@ -109,7 +250,7 @@ def apply_material_policies_to_records(records, two_sided='OFF', alpha_mode='AUT
         has_alpha = bool(opacity) and ('texture' in opacity or opacity.get('value', 1.0) < 0.999)
         blend = None
         if has_alpha and alpha_mode != 'OPAQUE':
-            if alpha_mode == 'TRANSLUCENT' or record.get('blended'):
+            if alpha_mode == 'TRANSLUCENT':
                 blend = 'TRANSLUCENT'
             else:
                 blend = 'MASKED'
@@ -127,6 +268,7 @@ def apply_material_policies_to_records(records, two_sided='OFF', alpha_mode='AUT
 
 MATERIAL_SCRIPT = '''
 import json
+import math
 import traceback
 import unreal
 
@@ -344,22 +486,22 @@ def configure_texture(texture, usage):
 
 try:
     result = {"master": None, "master_created": False, "master_upgraded": False,
-              "instances": 0, "assigned": 0, "textures_imported": 0,
+              "instances": 0, "instances_updated": 0, "assigned": 0, "textures_imported": 0,
               "missing_textures": [], "errors": []}
 
     master_path = PAYLOAD["master_path"]
     if EAL.does_asset_exist(master_path):
         master = EAL.load_asset(master_path)
-        try:
-            version = MEL.get_material_default_scalar_parameter_value(master, "B2UE_MasterVersion")
-        except Exception:
-            version = 0.0
-        if version < MASTER_VERSION:
-            # master built by an older version (no opacity, or linear
-            # samplers defaulting to an sRGB texture, which does not
-            # compile): rebuilt in place, the instances keep their parent
-            master = build_master(master_path, existing=master)
-            result["master_upgraded"] = True
+        # A project master belongs to the artist. Never rebuild its graph
+        # during Send, including when its version marker is old or absent.
+        if not isinstance(master, unreal.Material):
+            raise RuntimeError("Configured master is not a Material: " + master_path)
+        if any(record.get("opacity") for record in PAYLOAD["materials"].values()):
+            textures = {str(n) for n in MEL.get_texture_parameter_names(master)}
+            switches = {str(n) for n in MEL.get_static_switch_parameter_names(master)}
+            if "OpacityMap" not in textures or "UseOpacityMap" not in switches:
+                raise RuntimeError("Master needs OpacityMap and UseOpacityMap. "
+                                   "The existing graph was preserved: " + master_path)
         log("reusing master %s" % master_path)
     else:
         master = build_master(master_path)
@@ -374,13 +516,18 @@ try:
     texture_folder = PAYLOAD["texture_folder"]
     textures = {}
     usages = {}
+    content_hashes = {}
     to_import = []
     for entry in PAYLOAD["textures"]:
         usages[entry["name"]] = entry.get("usage", "color")
+        content_hash = entry["content_hash"]
+        content_hashes[entry["name"]] = content_hash
         asset_path = texture_folder + "/" + entry["name"]
         if EAL.does_asset_exist(asset_path):
-            textures[entry["name"]] = EAL.load_asset(asset_path)
-            continue
+            existing = EAL.load_asset(asset_path)
+            if EAL.get_metadata_tag(existing, "B2UE_ContentHash") == content_hash:
+                textures[entry["name"]] = existing
+                continue
         task = unreal.AssetImportTask()
         task.filename = entry["file"]
         task.destination_path = texture_folder
@@ -394,16 +541,27 @@ try:
         TOOLS.import_asset_tasks([task for _, task in to_import])
         for name, _task in to_import:
             asset_path = texture_folder + "/" + name
-            if EAL.does_asset_exist(asset_path):
+            if _task.imported_object_paths and EAL.does_asset_exist(asset_path):
                 textures[name] = EAL.load_asset(asset_path)
-    result["textures_imported"] = len(to_import)
+            else:
+                result["errors"].append("Texture import failed: " + name)
+    result["textures_imported"] = sum(name in textures for name, _task in to_import)
 
     for name, texture in textures.items():
-        if configure_texture(texture, usages.get(name, "color")):
+        changed = configure_texture(texture, usages.get(name, "color"))
+        if name in content_hashes and EAL.get_metadata_tag(texture, "B2UE_ContentHash") != content_hashes[name]:
+            EAL.set_metadata_tag(texture, "B2UE_ContentHash", content_hashes[name])
+            changed = True
+        if changed:
             EAL.save_asset(texture_folder + "/" + name, only_if_is_dirty=False)
 
-    # fall back to whatever the USD import produced, for anything we missed
+    # Do not recursively load the scene/root when every requested map was
+    # already found in the explicit export. This is the normal warm-send path.
+    needed = {data["texture"].lower() for record in PAYLOAD["materials"].values()
+              for data in record.values() if isinstance(data, dict) and "texture" in data}
     for folder in PAYLOAD["fallback_texture_folders"]:
+        if needed.issubset({name.lower() for name in textures}):
+            break
         if not EAL.does_directory_exist(folder):
             continue
         for path in EAL.list_assets(folder, recursive=True):
@@ -428,47 +586,75 @@ try:
     for blender_name, record in PAYLOAD["materials"].items():
         inst_name = "MI_" + record["name"]
         inst_path = instance_folder + "/" + inst_name
+        changed = [False]
         if EAL.does_asset_exist(inst_path):
             instance = EAL.load_asset(inst_path)
         else:
             instance = TOOLS.create_asset(
                 inst_name, instance_folder, unreal.MaterialInstanceConstant,
                 unreal.MaterialInstanceConstantFactoryNew())
-        instance.set_editor_property("parent", master)
+            changed[0] = True
+        if instance.get_editor_property("parent") != master:
+            instance.set_editor_property("parent", master)
+            changed[0] = True
+
+        def parameter_matches(kind, previous, value):
+            if kind == "scalar":
+                return math.isclose(previous, value, rel_tol=1e-6, abs_tol=1e-6)
+            if kind == "vector":
+                return all(math.isclose(getattr(previous, k), getattr(value, k),
+                                       rel_tol=1e-6, abs_tol=1e-6) for k in ("r", "g", "b", "a"))
+            return previous == value
+
+        def set_parameter(kind, name, value):
+            getter = getattr(MEL, "get_material_instance_" + kind + "_parameter_value")
+            if not parameter_matches(kind, getter(instance, name), value):
+                setter = getattr(MEL, "set_material_instance_" + kind + "_parameter_value")
+                setter(instance, name, value)
+                # UE 5.8's parameter setters return False even on success
+                # (their C++ bResult is never assigned). Verify by reading.
+                if not parameter_matches(kind, getter(instance, name), value):
+                    raise RuntimeError("Could not set %s on %s" % (name, inst_name))
+                changed[0] = True
 
         def apply_channel(key, map_param, switch_param, value_setter):
             data = record.get(key)
+            # Reset only this add-on's switch, and only if the effective value
+            # changes. Removing a mask must not leave yesterday's mask active.
+            use_map = bool(data and "texture" in data and find_texture(data["texture"]))
+            set_parameter("static_switch", switch_param, use_map)
             if not data:
+                if key == "opacity":
+                    value_setter(1.0)
                 return
             if "texture" in data:
                 tex = find_texture(data["texture"])
                 if tex is None:
                     result["missing_textures"].append(data["texture"])
                     return
-                MEL.set_material_instance_texture_parameter_value(instance, map_param, tex)
-                MEL.set_material_instance_static_switch_parameter_value(instance, switch_param, True)
+                set_parameter("texture", map_param, tex)
             elif "value" in data:
                 value_setter(data["value"])
 
         apply_channel(
             "base_color", "BaseColorMap", "UseBaseColorMap",
-            lambda v: MEL.set_material_instance_vector_parameter_value(
-                instance, "BaseColorTint",
+            lambda v: set_parameter(
+                "vector", "BaseColorTint",
                 unreal.LinearColor(v[0], v[1], v[2], 1.0) if isinstance(v, list) else
                 unreal.LinearColor(v, v, v, 1.0)))
         apply_channel(
             "roughness", "RoughnessMap", "UseRoughnessMap",
-            lambda v: MEL.set_material_instance_scalar_parameter_value(
-                instance, "Roughness", float(v if not isinstance(v, list) else v[0])))
+            lambda v: set_parameter(
+                "scalar", "Roughness", float(v if not isinstance(v, list) else v[0])))
         apply_channel(
             "metallic", "MetallicMap", "UseMetallicMap",
-            lambda v: MEL.set_material_instance_scalar_parameter_value(
-                instance, "Metallic", float(v if not isinstance(v, list) else v[0])))
+            lambda v: set_parameter(
+                "scalar", "Metallic", float(v if not isinstance(v, list) else v[0])))
         apply_channel("normal", "NormalMap", "UseNormalMap", lambda v: None)
         apply_channel(
             "opacity", "OpacityMap", "UseOpacityMap",
-            lambda v: MEL.set_material_instance_scalar_parameter_value(
-                instance, "Opacity", float(v if not isinstance(v, list) else v[0])))
+            lambda v: set_parameter(
+                "scalar", "Opacity", float(v if not isinstance(v, list) else v[0])))
 
         emissive = record.get("emissive")
         strength = record.get("emissive_strength", 0.0)
@@ -476,30 +662,38 @@ try:
             if "texture" in emissive:
                 tex = find_texture(emissive["texture"])
                 if tex is not None:
-                    MEL.set_material_instance_texture_parameter_value(instance, "EmissiveMap", tex)
-                    MEL.set_material_instance_static_switch_parameter_value(instance, "UseEmissiveMap", True)
+                    set_parameter("texture", "EmissiveMap", tex)
+                    set_parameter("static_switch", "UseEmissiveMap", True)
             elif isinstance(emissive.get("value"), list):
                 v = emissive["value"]
-                MEL.set_material_instance_vector_parameter_value(
-                    instance, "EmissiveTint", unreal.LinearColor(v[0], v[1], v[2], 1.0))
-            MEL.set_material_instance_scalar_parameter_value(instance, "EmissiveStrength", float(strength))
+                set_parameter("vector", "EmissiveTint", unreal.LinearColor(v[0], v[1], v[2], 1.0))
+            set_parameter("scalar", "EmissiveStrength", float(strength))
 
         # blend mode and two-sidedness are per-instance overrides
         try:
             overrides = instance.get_editor_property("base_property_overrides")
             blend = BLEND_MODES.get(record.get("blend"))
-            overrides.set_editor_property("override_blend_mode", blend is not None)
+            wanted = {"override_blend_mode": blend is not None}
             if blend is not None:
-                overrides.set_editor_property("blend_mode", blend)
+                wanted["blend_mode"] = blend
             two_sided = bool(record.get("two_sided"))
-            overrides.set_editor_property("override_two_sided", two_sided)
-            overrides.set_editor_property("two_sided", two_sided)
-            instance.set_editor_property("base_property_overrides", overrides)
-            MEL.update_material_instance(instance)
+            wanted.update(override_two_sided=two_sided, two_sided=two_sided)
+            overrides_changed = False
+            for key, value in wanted.items():
+                if overrides.get_editor_property(key) != value:
+                    overrides.set_editor_property(key, value)
+                    overrides_changed = True
+            if overrides_changed:
+                instance.set_editor_property("base_property_overrides", overrides)
+                changed[0] = True
+            if changed[0]:
+                MEL.update_material_instance(instance)
         except Exception as error:
             result["errors"].append("%s overrides: %s" % (inst_name, error))
 
-        EAL.save_asset(inst_path, only_if_is_dirty=False)
+        if changed[0]:
+            EAL.save_asset(inst_path, only_if_is_dirty=False)
+            result["instances_updated"] += 1
         instances[blender_name] = instance
         result["instances"] += 1
 
@@ -512,7 +706,9 @@ try:
     by_tag, by_label = {}, {}
     for actor in subsystem.get_all_level_actors():
         component = actor.get_component_by_class(unreal.StaticMeshComponent)
-        if component is None:
+        if component is None or component.static_mesh is None:
+            continue
+        if not component.static_mesh.get_path_name().startswith(PAYLOAD['scene_folder'] + '/'):
             continue
         by_label.setdefault(actor.get_actor_label(), []).append(component)
         for tag in actor.tags:
@@ -540,6 +736,9 @@ try:
         if mesh is None:
             result["unmatched_objects"].append(object_name)
             continue
+        if EAL.get_metadata_tag(mesh, 'B2UE_UVPlan') != PAYLOAD.get('uv_signatures', {}).get(object_name, ''):
+            result['errors'].append(object_name + ': UV mapping changed. Use Send to Unreal to update geometry first.')
+            continue
         for index, blender_material in enumerate(slot_names):
             instance = instances.get(blender_material)
             if instance is None:
@@ -547,13 +746,60 @@ try:
             try:
                 # on the ASSET, so every actor using it and every later
                 # placement gets it; component overrides are cleared
-                mesh.set_material(index, instance)
+                if mesh.get_material(index) != instance:
+                    mesh.set_material(index, instance)
                 for component in components:
-                    component.set_material(index, None)
+                    overrides = component.get_editor_property("override_materials")
+                    if index < len(overrides) and overrides[index] is not None:
+                        component.set_material(index, None)
                 result["assigned"] += 1
             except Exception as error:
                 result["errors"].append("%s slot %d: %s" % (object_name, index, error))
         EAL.save_loaded_asset(mesh, only_if_is_dirty=True)
+
+    # USD merges a rig's skinning targets into one SkeletalMesh and numbers
+    # the slots. The sync records their material binding order as metadata.
+    for rig_name in PAYLOAD.get('skeletal_rigs', []):
+        path = PAYLOAD.get('skeletal_paths', {}).get(rig_name)
+        mesh = EAL.load_asset(path) if path else None
+        if mesh is None:
+            for path in assets_by_name.values():
+                candidate = EAL.load_asset(path)
+                if isinstance(candidate, unreal.SkeletalMesh) and EAL.get_metadata_tag(candidate, 'B2UE_RigName') == rig_name:
+                    mesh = candidate
+                    break
+        if not isinstance(mesh, unreal.SkeletalMesh):
+            result['unmatched_objects'].append(rig_name)
+            continue
+        try:
+            if (EAL.get_metadata_tag(mesh, 'B2UE_RigUVPlan') or '{}') != PAYLOAD.get('rig_uv_signatures', {}).get(rig_name, '{}'):
+                raise RuntimeError('UV mapping changed. Use Send to Unreal to update geometry first.')
+            slot_names = json.loads(EAL.get_metadata_tag(mesh, 'B2UE_MaterialSlots'))
+            slots = list(mesh.get_editor_property('materials'))
+            if len(slot_names) != len(slots):
+                raise RuntimeError('USD material slot count differs: %d expected / %d imported; assignments preserved' % (len(slot_names), len(slots)))
+            changed = False
+            for index, blender_material in enumerate(slot_names):
+                if blender_material is None:
+                    continue
+                instance = instances.get(blender_material)
+                if instance is None:
+                    raise RuntimeError('Missing material instance: ' + blender_material)
+                if slots[index].material_interface != instance:
+                    slots[index].material_interface = instance
+                    changed = True
+                result['assigned'] += 1
+            if changed:
+                mesh.set_editor_property('materials', slots)
+                EAL.save_loaded_asset(mesh, only_if_is_dirty=True)
+            for actor in subsystem.get_all_level_actors():
+                component = actor.get_component_by_class(unreal.SkeletalMeshComponent)
+                if component and component.get_editor_property('skeletal_mesh_asset') == mesh:
+                    for index, material in enumerate(component.get_editor_property('override_materials')):
+                        if material is not None and index < len(slots):
+                            component.set_material(index, None)
+        except Exception as error:
+            result['errors'].append('%s: %s' % (rig_name, error))
 
     log("B2UE_MAT_RESULT " + json.dumps(result))
 except Exception:
@@ -561,12 +807,15 @@ except Exception:
 '''
 
 
-def build_material_instances(context, objects, two_sided='OFF', alpha_mode='AUTO'):
+def build_material_instances(context, objects, two_sided='OFF', alpha_mode='AUTO', skeletal_paths=None):
     """Rebuild the materials of `objects` as instances of the master material
     in the open Unreal project and assign them to the sent meshes.
 
     :return tuple: (success, message, result dict or None)
     """
+    started = time.perf_counter()
+    skeletal_assets, static_objects = split_skeletal_assets(objects)
+    objects = list(dict.fromkeys(list(objects) + [o for a in skeletal_assets for o in a['objects']]))
     materials = collect_materials(objects)
     if not materials:
         return False, "No materials found on those objects", None
@@ -578,6 +827,10 @@ def build_material_instances(context, objects, two_sided='OFF', alpha_mode='AUTO
 
     records = apply_material_policies_to_records(
         extract_material_data(materials), two_sided, alpha_mode)
+    from .material_graph import record_warnings, uv_signatures
+    warnings = record_warnings(records)
+    if warnings:
+        return False, 'Unsupported materials: ' + '; '.join(warnings[:3]), {'errors': warnings}
     texture_dir = os.path.join(get_staging_dir(), 'b2ue_textures', scene_name)
     master_path = (settings.ue_master_material or '/Game/BlenderSync/M_B2UE_Master').rstrip('/')
     payload = {
@@ -591,8 +844,12 @@ def build_material_instances(context, objects, two_sided='OFF', alpha_mode='AUTO
         'fallback_texture_folders': [scene_folder, content_root],
         'textures': export_material_textures(records, texture_dir),
         'materials': records,
-        'slots': build_material_slots(objects),
+        'slots': build_material_slots(static_objects),
+        'skeletal_rigs': [a['name'] for a in skeletal_assets],
+        'skeletal_paths': skeletal_paths or {},
+        'rig_uv_signatures': {a['name']: json.dumps({name: sig for name, sig in uv_signatures(a['objects'], records).items() if sig}, sort_keys=True) for a in skeletal_assets},
         'scene_folder': scene_folder,
+        'uv_signatures': uv_signatures(objects, records),
         # asset names the sync gives a mesh: the object's name, with '_Mesh'
         # appended when it ends in digits (Unreal would strip them otherwise)
         'mesh_names': {obj.name: [sanitize_prim_name(obj.name),
@@ -606,10 +863,16 @@ def build_material_instances(context, objects, two_sided='OFF', alpha_mode='AUTO
     with open(script_path, 'w', encoding='utf-8') as handle:
         handle.write(script)
 
+    export_seconds = time.perf_counter() - started
+    started = time.perf_counter()
     success, output = run_unreal_python([
         f'exec(compile(open("{script_path.replace(chr(92), "/")}", encoding="utf-8").read(),'
         f' "b2ue_materials", "exec"))'
     ])
+    print('B2UE_MATERIAL_TIMINGS ' + json.dumps({
+        'prepare_and_export_seconds': round(export_seconds, 3),
+        'unreal_rpc_seconds': round(time.perf_counter() - started, 3),
+    }))
     if not success:
         return False, f"Unreal connection failed: {output}", None
 
@@ -628,7 +891,7 @@ def build_material_instances(context, objects, two_sided='OFF', alpha_mode='AUTO
         return False, ("Unreal reported an error while building the materials. Details: "
                        "System Console (Window menu) or Unreal's Output Log, lines [B2UE-MAT]"), None
     if not data:
-        return True, "material build sent, check Unreal's Output Log", None
+        return False, "No material result received; check Unreal's Output Log", None
 
     message = (f"{data['instances']} material instance(s), "
                f"{data.get('textures_imported', 0)} texture(s) imported, "
@@ -647,7 +910,7 @@ def build_material_instances(context, objects, two_sided='OFF', alpha_mode='AUTO
     if data.get('errors'):
         message += f", {len(data['errors'])} error(s) (see console)"
         print(f"Build Material Instances - errors: {data['errors']}")
-    return True, message, data
+    return not any(data.get(k) for k in ('errors', 'missing_textures', 'unmatched_objects')), message, data
 
 
 # ============================================================================

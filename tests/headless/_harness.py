@@ -5,6 +5,7 @@ The add-on must be installed in the Blender that runs the tests, under the
 module name ``KelitToolkit``.
 """
 import json
+import os
 import sys
 
 import addon_utils
@@ -13,17 +14,47 @@ import bpy
 ADDON = 'KelitToolkit'
 
 
+def refuse_real_preferences():
+    """Hard stop before anything runs: a headless test must never be able
+    to write the user's real Blender preferences. On 7 October 2026 a test
+    saved factory settings over Kelit's userpref.blend and disabled every
+    add-on. Tests only run with BLENDER_USER_CONFIG pointing at a temporary
+    folder (tests/run_tests.py sets it)."""
+    import tempfile
+    config = os.environ.get('BLENDER_USER_CONFIG', '')
+    temp_root = os.path.normcase(os.path.abspath(tempfile.gettempdir()))
+    if not config or not os.path.normcase(os.path.abspath(config)).startswith(temp_root):
+        print('REFUSED: run the tests through tests/run_tests.py, which isolates the '
+              'Blender preferences (BLENDER_USER_CONFIG must be a temporary folder)')
+        sys.exit(2)
+    original = bpy.ops.wm.save_userpref
+
+    def blocked(*_args, **_kwargs):
+        raise RuntimeError('save_userpref is blocked inside the test suite')
+    try:
+        bpy.ops.wm.save_userpref = blocked
+    except Exception:
+        pass
+    return original
+
+
 class Harness:
     def __init__(self):
+        refuse_real_preferences()
         self.report = {}
         self.failures = []
         self.out_path = None
         if '--' in sys.argv and len(sys.argv) > sys.argv.index('--') + 1:
             self.out_path = sys.argv[sys.argv.index('--') + 1]
+        source = os.environ.get('KELIT_TEST_ADDON_ROOT')
+        if source:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(source)))
         addon_utils.enable(ADDON, default_set=False, handle_error=None)
         self.module = sys.modules.get(ADDON)
         if self.module is None:
             raise RuntimeError(f'{ADDON} is not installed in this Blender')
+        if source and os.path.normcase(os.path.dirname(self.module.__file__)) != os.path.normcase(os.path.abspath(source)):
+            raise RuntimeError('Tests loaded another addon copy: ' + self.module.__file__)
 
     def check(self, name, condition, detail=None):
         ok = bool(condition)

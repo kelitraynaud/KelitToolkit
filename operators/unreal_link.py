@@ -424,7 +424,36 @@ class UNREAL_OT_fix_interchange_permanent(bpy.types.Operator):
         return {'FINISHED'}
 
 
+_PROJECT_CHOICES = [('AUTO', 'Automatic (one editor only)', 'Refuse to guess when multiple editors are open')]
+
+
+class UNREAL_OT_choose_project(bpy.types.Operator):
+    """Choose which running Unreal project receives all toolkit commands"""
+    bl_idname = 'kelit_toolkit.choose_unreal_project'
+    bl_label = 'Choose Unreal Project'
+    destination: bpy.props.EnumProperty(name='Destination', items=lambda self, context: _PROJECT_CHOICES)
+
+    def invoke(self, context, event):
+        from . import ue_remote
+        global _PROJECT_CHOICES
+        nodes = ue_remote.find_editors(wait_seconds=0.8)
+        choices = {n['project_root']: (n['project_root'], n['project_name'], n['project_root']) for n in nodes}
+        _PROJECT_CHOICES = [('AUTO', 'Automatic (one editor only)', 'Refuse to guess when multiple editors are open')] + list(choices.values())
+        current = context.scene.kelit_toolkit_settings.ue_target_project
+        self.destination = current if current in choices else (next(iter(choices)) if len(choices) == 1 else 'AUTO')
+        return context.window_manager.invoke_props_dialog(self, width=500)
+
+    def draw(self, context):
+        self.layout.prop(self, 'destination')
+        self.layout.label(text='Geometry and materials stay on this project throughout a send.')
+
+    def execute(self, context):
+        context.scene.kelit_toolkit_settings.ue_target_project = '' if self.destination == 'AUTO' else self.destination
+        return {'FINISHED'}
+
+
 classes = (
+    UNREAL_OT_choose_project,
     UNREAL_OT_connection_doctor,
     UNREAL_OT_test_connection,
     UNREAL_OT_fix_interchange_permanent,

@@ -5,6 +5,56 @@ built on the vendored Epic remote_execution module (see dependencies/).
 """
 
 import time
+import os
+from contextlib import contextmanager
+
+_PINNED_EDITOR = None
+
+
+class TargetSelectionError(RuntimeError):
+    pass
+
+
+def project_key(path):
+    return os.path.normcase(os.path.normpath(path or '')).replace('\\', '/').casefold()
+
+
+def choose_editor(nodes, project=''):
+    candidates = [n for n in nodes if not project or
+                  project_key(n.get('project_root')) == project_key(project)]
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise TargetSelectionError('Selected Unreal project is not available: ' + project
+                                   if project else 'No Unreal editor answered discovery')
+    raise TargetSelectionError('Multiple Unreal editors are open. Choose the destination '
+                               'with Choose Project in the Send panel (one editor per project).')
+
+
+def selected_project():
+    try:
+        import bpy
+        return bpy.context.scene.kelit_toolkit_settings.ue_target_project
+    except (ImportError, AttributeError):
+        return ''
+
+
+def resolve_target():
+    if _PINNED_EDITOR is not None:
+        return _PINNED_EDITOR
+    return choose_editor(find_editors(wait_seconds=0.8), selected_project())
+
+
+@contextmanager
+def pin_editor(node):
+    """Keep geometry and material RPCs on the same running editor."""
+    global _PINNED_EDITOR
+    previous = _PINNED_EDITOR
+    _PINNED_EDITOR = dict(node)
+    try:
+        yield
+    finally:
+        _PINNED_EDITOR = previous
 
 
 def _get_remote_execution():
@@ -78,17 +128,32 @@ def run_commands(commands, connection_attempts=300):
 
 def _run(remote_exec, commands, attempts):
     try:
-        for _ in range(max(1, attempts)):
+        for attempt in range(max(1, attempts)):
             time.sleep(0.1)
-            for node in remote_exec.remote_nodes:
-                remote_exec.open_command_connection(node.get('node_id'))
+            nodes = list(remote_exec.remote_nodes)
+            if _PINNED_EDITOR is not None:
+                nodes = [n for n in nodes if n.get('node_id') == _PINNED_EDITOR.get('node_id')
+                         and project_key(n.get('project_root')) == project_key(_PINNED_EDITOR.get('project_root'))]
+                if not nodes:
+                    continue
+            elif attempt < 7:
+                continue  # collect discovery replies before deciding there is just one editor
+            if not nodes:
+                continue
+            node = choose_editor(nodes, '' if _PINNED_EDITOR else selected_project())
+            remote_exec.open_command_connection(node.get('node_id'))
             if remote_exec.has_command_connection():
-                return remote_exec.run_command('\n'.join(commands), unattended=False)
+                response = remote_exec.run_command('\n'.join(commands), unattended=False)
+                if response and response.get('success') is False:
+                    raise RuntimeError(response.get('result') or _format_response(response))
+                return response
+        if _PINNED_EDITOR:
+            raise TargetSelectionError('The pinned Unreal editor is no longer available. Retry the send.')
         raise ConnectionError('Could not find an open Unreal Editor instance!')
-    except ConnectionError:
+    except (ConnectionError, TargetSelectionError):
         raise
     except Exception as error:
-        raise ConnectionError(f'Could not reach the Unreal Editor: {error}')
+        raise RuntimeError(f'Unreal command failed: {error}') from error
 
 
 def find_editors(wait_seconds=2.0):

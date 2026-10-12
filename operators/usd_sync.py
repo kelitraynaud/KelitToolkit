@@ -22,6 +22,7 @@ import math
 import os
 import re
 import tempfile
+import time
 
 import bpy
 
@@ -196,61 +197,30 @@ def unreal_texture_name(image):
 
 
 def resolve_bsdf_input(socket, depth=0):
-    """
-    Describe what feeds a Principled BSDF input.
-
-    Returns {'texture': <UE asset name>, 'image': <blender image>} when the
-    chain ends on an image, {'value': ...} for a constant, or None when the
-    chain is something we cannot express as a simple PBR parameter.
-    """
-    if socket is None:
-        return None
-    if not socket.is_linked:
-        value = getattr(socket, 'default_value', None)
-        if hasattr(value, '__len__') and not isinstance(value, str):
-            return {'value': [round(float(v), 5) for v in value][:3]}
-        if value is None:
-            return None
-        return {'value': round(float(value), 5)}
-
-    node = socket.links[0].from_node
-    hops = 0
-    while node is not None and hops < 6:
-        if node.type == 'TEX_IMAGE':
-            if node.image is None:
-                return None
-            return {'texture': unreal_texture_name(node.image),
-                    'image': node.image.name,
-                    'colorspace': node.image.colorspace_settings.name}
-        # step through normal-map / bump / colour-adjust nodes
-        nxt = None
-        for candidate in ('Color', 'Height', 'Fac'):
-            inner = node.inputs.get(candidate)
-            if inner is not None and inner.is_linked:
-                nxt = inner.links[0].from_node
-                break
-        if nxt is None:
-            for inner in node.inputs:
-                if inner.is_linked:
-                    nxt = inner.links[0].from_node
-                    break
-        node = nxt
-        hops += 1
-    return None
+    from .material_graph import inspect_input
+    return inspect_input(socket, unreal_texture_name, depth)
 
 
 def get_principled(material):
     if not material or not material.use_nodes or material.node_tree is None:
         return None
-    for node in material.node_tree.nodes:
+    output = material.node_tree.get_output_node('ALL')
+    socket = output.inputs.get('Surface') if output else None
+    for _ in range(16):
+        if socket is None or not socket.is_linked:
+            break
+        node = socket.links[0].from_node
         if node.type == 'BSDF_PRINCIPLED':
             return node
+        if node.type != 'REROUTE':
+            break  # shader mixes/groups cannot be flattened by picking an arbitrary BSDF
+        socket = node.inputs[0]
     return None
 
 
 def has_parasitic_alpha(material):
     """
-    True when Alpha is driven by the very image that drives Base Color.
+    True only for an unchanged Color output also wired into Base Color.
 
     C4D/Redshift conversions routinely wire the diffuse map into Alpha as
     well. Blender hides it (the maps are opaque), but USD then exports an
@@ -264,7 +234,11 @@ def has_parasitic_alpha(material):
     if not alpha or 'texture' not in alpha:
         return False
     base = resolve_bsdf_input(bsdf.inputs.get('Base Color'))
-    return bool(base and base.get('image') == alpha.get('image'))
+    return bool(base and alpha.get('channel') == 'Color'
+                and base.get('channel') == 'Color'
+                and alpha.get('direct') and base.get('direct')
+                and base.get('source_node') == alpha.get('source_node')
+                and base.get('image') == alpha.get('image'))
 
 
 @contextlib.contextmanager
@@ -284,7 +258,7 @@ def temporarily_opaque(materials):
         link = alpha.links[0]
         attribute, previous = surface_method(material)
         undone.append((material, bsdf, link.from_node, link.from_socket,
-                       attribute, previous))
+                       attribute, previous, alpha.default_value))
         material.node_tree.links.remove(link)
         alpha.default_value = 1.0
         if attribute is not None:
@@ -296,7 +270,8 @@ def temporarily_opaque(materials):
     try:
         yield len(undone)
     finally:
-        for material, bsdf, from_node, from_socket, attribute, previous in undone:
+        for material, bsdf, from_node, from_socket, attribute, previous, alpha_value in undone:
+            bsdf.inputs['Alpha'].default_value = alpha_value
             material.node_tree.links.new(from_socket, bsdf.inputs['Alpha'])
             if attribute is not None:
                 try:
@@ -958,6 +933,8 @@ def split_skeletal_assets(objects):
                 continue
             if get_deform_armature(mesh) == armature or is_descendant_of(mesh, armature):
                 members.append(mesh)
+        if len(members) == 1:
+            continue  # a bare armature cannot produce a SkeletalMesh
         skeletal_assets.append({'type': 'SKELETAL', 'name': armature.name,
                                 'root': armature, 'objects': members})
         member_names.update(member.name for member in members)
@@ -967,19 +944,55 @@ def split_skeletal_assets(objects):
     return skeletal_assets, remaining
 
 
-def export_skeletal_usd(filepath, asset):
+def has_skeletal_animation(asset):
+    """Conservative detection of actions, NLA and driven rigs, including targets.
+
+    An assigned action counts even outside the current frame range. Drivers
+    may depend on frame or external state, so keep them rather than dropping
+    potentially animated deformation. A static rig needs no animation bake.
+    """
+    pending = list(asset['objects'])
+    seen = set()
+    while pending:
+        obj = pending.pop()
+        if obj.as_pointer() in seen:
+            continue
+        seen.add(obj.as_pointer())
+        data = getattr(obj, 'data', None)
+        for block in (obj, data, getattr(data, 'shape_keys', None)):
+            animation = getattr(block, 'animation_data', None)
+            if animation and (animation.action or animation.drivers or any(
+                    not track.mute and any(not strip.mute for strip in track.strips)
+                    for track in animation.nla_tracks)):
+                return True
+        if obj.parent:
+            pending.append(obj.parent)
+        constraints = list(obj.constraints)
+        if obj.type == 'ARMATURE' and obj.pose:
+            for bone in obj.pose.bones:
+                constraints.extend(bone.constraints)
+        for constraint in constraints:
+            target = getattr(constraint, 'target', None)
+            if target is not None and not constraint.mute:
+                pending.append(target)
+    return False
+
+
+def export_skeletal_usd(filepath, asset, include_animation=True, bake_material_uvs=False):
     """
     Export one skeletal asset to its own USD: armature + skinned meshes +
     blend shapes + the active action (UsdSkel), at the world origin so the
     imported SkeletalMesh asset is clean. The material quirks neutralised by
     the static flow are neutralised here too.
     """
+    from .material_graph import temporary_material_uvs
     materials = collect_materials(asset['objects'])
-    with temporarily_visible(asset['objects']), \
+    with (temporary_material_uvs(asset['objects']) if bake_material_uvs else contextlib.nullcontext()), \
+             temporarily_visible(asset['objects']), \
             temporarily_opaque(materials), \
             temporarily_unique_material_names(materials), \
             isolated_selection(asset['objects']), \
-            action_frame_range(bpy.context, asset, True), \
+            action_frame_range(bpy.context, asset, include_animation), \
             at_neutral_root(asset):
         bpy.ops.wm.usd_export(
             filepath=filepath,
@@ -990,10 +1003,16 @@ def export_skeletal_usd(filepath, asset):
             export_lights=False,
             export_cameras=False,
             export_armatures=True,
+            export_uvmaps=True,
+            rename_uvmaps=True,
             export_shapekeys=True,
-            export_animation=True,
+            export_animation=include_animation,
             only_deform_bones=False,
         )
+    from pxr import Usd
+    stage = Usd.Stage.Open(filepath)
+    if normalize_uv_primvars(stage)['uv_renamed']:
+        stage.GetRootLayer().Save()
 
 
 # ============================================================================
@@ -1012,13 +1031,13 @@ TWO_SIDED_ITEMS = [
 ]
 
 ALPHA_MODE_ITEMS = [
-    ('AUTO', "Cutout (translucent only for Blended materials)",
+    ('AUTO', "Masked by default (alpha connected)",
      "A material with something plugged into Alpha becomes a Masked material in Unreal "
-     "(opaque, depth-sorted, transparent where the alpha is black). Only Blender materials "
-     "set to Blended stay translucent"),
+     "(opaque, depth-sorted, transparent where the alpha is black). Choose Translucent "
+     "explicitly for continuous transparency"),
     ('OPAQUE', "Ignore alpha",
      "The Alpha input is dropped: every material is opaque in Unreal"),
-    ('TRANSLUCENT', "Translucent as exported",
+    ('TRANSLUCENT', "Translucent (continuous transparency)",
      "Unreal's default for USD opacity: translucent materials, no depth sorting"),
 ]
 
@@ -1059,7 +1078,7 @@ def apply_material_policies(filepath, alpha_mode='AUTO', two_sided='OFF', blende
             continue
         mode = alpha_mode
         if mode == 'AUTO':
-            mode = 'TRANSLUCENT' if prim.GetParent().GetName() in blended else 'MASKED'
+            mode = 'MASKED'
         if mode == 'OPAQUE':
             opacity.DisconnectSource()
             opacity.Set(1.0)
@@ -1078,12 +1097,13 @@ def apply_material_policies(filepath, alpha_mode='AUTO', two_sided='OFF', blende
 
 
 def export_usd_hierarchy(filepath, objects, export_materials=True,
-                         alpha_mode='AUTO', two_sided='OFF'):
+                         alpha_mode='AUTO', two_sided='OFF', bake_material_uvs=False):
     """
     Export *objects* to .usda with hierarchy preserved, then inject USD 'kind'
     metadata so Unreal keeps each mesh as a separate static mesh on import.
     Restores the user's selection afterwards. Returns the kind-tag counts.
     """
+    from .material_graph import temporary_material_uvs
     original_selection = [o for o in bpy.context.selected_objects]
     original_active = bpy.context.view_layer.objects.active
     materials = collect_materials(objects)
@@ -1094,7 +1114,8 @@ def export_usd_hierarchy(filepath, objects, export_materials=True,
         # export, then undone: viewport-hidden objects, parasitic alpha that
         # would make Unreal build translucent materials, and material names
         # ending in digits that Unreal would collide and merge
-        with temporarily_visible(objects), \
+        with (temporary_material_uvs(objects) if bake_material_uvs else contextlib.nullcontext()), \
+                temporarily_visible(objects), \
                 temporarily_opaque(materials), \
                 temporarily_unique_material_names(materials):
             for obj in bpy.data.objects:
@@ -1115,6 +1136,8 @@ def export_usd_hierarchy(filepath, objects, export_materials=True,
                 filepath=filepath,
                 selected_objects_only=True,
                 export_materials=export_materials,
+                export_uvmaps=True,
+                rename_uvmaps=True,
                 triangulate_meshes=True,
                 export_animation=False,
                 use_instancing=False,
@@ -1212,6 +1235,74 @@ def rename_mesh_prims_to_object_names(filepath):
     return hints, data_hints
 
 
+def normalize_uv_primvars(stage):
+    """Keep Blender's active render UV ('st') first in Unreal's name sort.
+
+    Rename attribute specifications only; never read or copy UV arrays.
+    Run inside the existing metadata pass, without another USD open/save.
+    Shader primvar readers are updated too, for the USD-material path.
+    All source layers are preserved, including ones over UE's four-set limit.
+    """
+    from pxr import UsdGeom, UsdShade, Sdf
+
+    meshes, names, readers = [], set(), []
+    for prim in stage.Traverse():
+        if prim.GetTypeName() == 'Mesh':
+            variables = [v for v in UsdGeom.PrimvarsAPI(prim).GetPrimvars()
+                         if str(v.GetTypeName()) in ('texCoord2f[]', 'float2[]')]
+            names.update(str(v.GetPrimvarName()) for v in variables)
+            meshes.append((prim.GetPath(), variables))
+        elif prim.GetTypeName() == 'Shader':
+            shader = UsdShade.Shader(prim)
+            if str(shader.GetIdAttr().Get()).startswith('UsdPrimvarReader_'):
+                readers.append(shader.GetInput('varname'))
+
+    mapping = {}
+    for name in sorted(names):
+        if name >= 'st':
+            continue
+        target = 'st_' + name
+        while target in names:
+            target = 'st_' + target
+        names.add(target)
+        mapping[name] = target
+
+    edits = Sdf.BatchNamespaceEdit()
+    renamed, limited = 0, []
+    for path, variables in meshes:
+        if len(variables) > 4:
+            limited.append(str(path))
+        for variable in variables:
+            target = mapping.get(str(variable.GetPrimvarName()))
+            if target is None:
+                continue
+            old = variable.GetAttr().GetPath()
+            edits.Add(old, path.AppendProperty('primvars:' + target))
+            if variable.IsIndexed():
+                edits.Add(variable.GetIndicesAttr().GetPath(),
+                          path.AppendProperty('primvars:' + target + ':indices'))
+            renamed += 1
+    if renamed and not stage.GetRootLayer().Apply(edits):
+        raise RuntimeError('Could not put the active UV map first for Unreal')
+    visited = set()
+    while readers:
+        reader = readers.pop()
+        if not reader or reader.GetAttr().GetPath() in visited:
+            continue
+        visited.add(reader.GetAttr().GetPath())
+        source = reader.GetConnectedSource()
+        if source:
+            api, name, kind = source
+            readers.append(api.GetInput(name) if kind == UsdShade.AttributeType.Input
+                           else api.GetOutput(name))
+        elif str(reader.Get()) in mapping:
+            reader.Set(mapping[str(reader.Get())])
+    if limited:
+        print('[KelitToolkit] Unreal USD keeps four UV sets; active UV preserved. '
+              '%d mesh(es) have additional sets: %s' % (len(limited), ', '.join(limited[:3])))
+    return {'uv_renamed': renamed, 'uv_over_limit': len(limited)}
+
+
 def inject_kind_metadata(filepath):
     """
     Tag each Xform prim with a USD 'kind':
@@ -1229,6 +1320,7 @@ def inject_kind_metadata(filepath):
 
     stage = Usd.Stage.Open(filepath)
     tagged = {'component': 0, 'group': 0}
+    tagged.update(normalize_uv_primvars(stage))
     for prim in stage.Traverse():
         if prim.GetTypeName() != 'Xform':
             continue
@@ -1303,6 +1395,7 @@ def _inject_kind_metadata_text(filepath):
 # ============================================================================
 
 UNREAL_SCRIPT_TEMPLATE = '''
+import os
 import json
 import traceback
 import unreal
@@ -1468,14 +1561,37 @@ try:
             log('UsdStageImportOptions unavailable, using import defaults: %s' % error)
         unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
 
-    if PAYLOAD['usd_file']:
+    static_reused = False
+    cache_reason = 'forced or no fingerprint'
+    fingerprint = PAYLOAD.get('static_fingerprint')
+    cached_paths = []
+    if fingerprint and not PAYLOAD.get('force_reimport'):
+        try:
+            with open(PAYLOAD['cache_file'], encoding='utf-8') as handle:
+                cached = json.load(handle)
+            cached_paths = cached.get('assets', [])
+            cache_reason = 'fingerprint changed' if cached.get('fingerprint') != fingerprint else 'checking assets'
+            static_reused = cached.get('version') == 1 and cached.get('fingerprint') == fingerprint and bool(cached_paths)
+            for path in cached_paths if static_reused else []:
+                asset = unreal.EditorAssetLibrary.load_asset(path)
+                if not isinstance(asset, unreal.StaticMesh) or unreal.EditorAssetLibrary.get_metadata_tag(asset, 'B2UE_StaticImportHash') != fingerprint:
+                    static_reused = False
+                    cache_reason = 'asset or metadata missing: ' + path
+                    break
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            static_reused = False
+            cache_reason = str(error)
+    log('Geometry cache: ' + ('hit' if static_reused else cache_reason))
+    if PAYLOAD['usd_file'] and not static_reused:
         import_usd(PAYLOAD['usd_file'], dest, False)
+    if static_reused:
+        log('Static geometry unchanged: reusing %d meshes' % len(cached_paths))
 
     # 1b) Import each skeletal asset (SkeletalMesh + Skeleton + AnimSequence)
     skeletal_assets = {}
     for skel in PAYLOAD.get('skeletal', []):
         sk_dest = dest + '/' + PAYLOAD['scene_name'] + '/' + skel['asset_name']
-        import_usd(skel['usd_file'], sk_dest, True)
+        import_usd(skel['usd_file'], sk_dest, skel.get('include_animation', True))
         sk_mesh = None
         anim_seq = None
         if unreal.EditorAssetLibrary.does_directory_exist(sk_dest):
@@ -1486,9 +1602,14 @@ try:
                     continue
                 if sk_mesh is None and isinstance(asset, unreal.SkeletalMesh):
                     sk_mesh = asset
-                elif anim_seq is None and isinstance(asset, unreal.AnimSequence):
+                elif skel.get('include_animation', True) and anim_seq is None and isinstance(asset, unreal.AnimSequence):
                     anim_seq = asset
         skeletal_assets[skel['name']] = (sk_mesh, anim_seq)
+        if sk_mesh is not None:
+            unreal.EditorAssetLibrary.set_metadata_tag(sk_mesh, 'B2UE_RigName', skel['name'])
+            unreal.EditorAssetLibrary.set_metadata_tag(sk_mesh, 'B2UE_MaterialSlots', json.dumps(skel.get('material_slots', [])))
+            unreal.EditorAssetLibrary.set_metadata_tag(sk_mesh, 'B2UE_RigUVPlan', PAYLOAD.get('rig_uv_signatures', {}).get(skel['name'], '{}'))
+            unreal.EditorAssetLibrary.save_directory(sk_dest, only_if_is_dirty=True, recursive=True)
         log('skeletal %s: mesh=%s anim=%s' % (skel['name'], sk_mesh is not None, anim_seq is not None))
 
     # 2) Map imported static meshes.
@@ -1502,8 +1623,37 @@ try:
         scan_root = dest
     prim_map = {}
     name_map = {}
-    if unreal.EditorAssetLibrary.does_directory_exist(scan_root):
-        for asset_path in unreal.EditorAssetLibrary.list_assets(scan_root, recursive=True):
+
+    def candidate_paths():
+        """Every asset path that may hold an imported static mesh. Assets
+        the importer just created live in memory only: the editor's folder
+        listing does not show them yet (the Porsche send placed 49 empty
+        actors that way), so the in-memory asset registry is read too."""
+        if static_reused:
+            return list(cached_paths)
+        paths = []
+        if not PAYLOAD['usd_file']:
+            return paths
+        try:
+            unreal.EditorAssetLibrary.save_directory(scan_root, only_if_is_dirty=True, recursive=True)
+        except Exception as error:
+            log('could not save the imported meshes yet: %s' % error)
+        try:
+            paths.extend(str(p) for p in unreal.EditorAssetLibrary.list_assets(scan_root, recursive=True))
+        except Exception as error:
+            log('asset listing failed: %s' % error)
+        try:
+            registry = unreal.AssetRegistryHelpers.get_asset_registry()
+            for data in registry.get_assets_by_path(scan_root, recursive=True,
+                                                     include_only_on_disk_assets=False):
+                package = str(data.package_name)
+                paths.append(package + '.' + str(data.asset_name))
+        except Exception as error:
+            log('asset registry lookup failed: %s' % error)
+        seen = set()
+        return [p for p in paths if '.' in p.rsplit('/', 1)[-1] and not (p in seen or seen.add(p))]
+
+    for asset_path in candidate_paths():
             try:
                 asset = unreal.EditorAssetLibrary.load_asset(asset_path)
             except Exception:
@@ -1573,6 +1723,21 @@ try:
             for candidate in ('SM_' + key, key):
                 if candidate in name_map:
                     return name_map[candidate]
+        # last resort: load by the path the USD importer uses, which works
+        # for in-memory assets whatever the listings say
+        for raw in (entry.get('asset_hint') or '', entry['name'], entry.get('mesh_name') or ''):
+            if not raw:
+                continue
+            key = sanitize(raw)
+            for candidate in (key, 'SM_' + key):
+                for folder in (scan_root + '/StaticMeshes', scan_root):
+                    path = folder + '/' + candidate + '.' + candidate
+                    if not unreal.EditorAssetLibrary.does_asset_exist(path):
+                        continue
+                    asset = unreal.EditorAssetLibrary.load_asset(path)
+                    if isinstance(asset, unreal.StaticMesh):
+                        name_map[candidate] = asset
+                        return asset
         return None
 
     # resolve every mesh first, then fill gaps via shared Blender mesh data
@@ -1593,9 +1758,33 @@ try:
             if asset is not None:
                 resolved[entry['name']] = asset
 
-    result = {'assets': len(name_map), 'spawned': 0, 'attached': 0, 'missing': [],
+    skeletal_count = sum(mesh is not None for mesh, _anim in skeletal_assets.values())
+    missing = [entry['name'] for entry in PAYLOAD['objects']
+               if entry['type'] == 'MESH' and entry['name'] not in resolved]
+    missing.extend(name for name, (mesh, _anim) in skeletal_assets.items() if mesh is None)
+    result = {'assets': len({a.get_path_name() for a in resolved.values()}) + skeletal_count,
+              'spawned': 0, 'attached': 0, 'missing': missing,
               'sequence_bindings': 0, 'sequence': None, 'camera_cut': False,
-              'two_sided_fixed': result_two_sided, 'skeletal': 0}
+              'two_sided_fixed': result_two_sided, 'skeletal': skeletal_count,
+              'static_reused': len(cached_paths) if static_reused else 0,
+              'cache_reason': 'hit' if static_reused else cache_reason,
+              'skeletal_paths': {name: mesh.get_path_name() for name, (mesh, _anim) in skeletal_assets.items() if mesh}}
+
+    for name, asset in resolved.items():
+        signature = PAYLOAD.get('uv_signatures', {}).get(name, '')
+        if unreal.EditorAssetLibrary.get_metadata_tag(asset, 'B2UE_UVPlan') != signature:
+            unreal.EditorAssetLibrary.set_metadata_tag(asset, 'B2UE_UVPlan', signature)
+
+    if fingerprint and not static_reused and not missing:
+        paths = sorted({a.get_path_name() for a in resolved.values()})
+        for asset in set(resolved.values()):
+            unreal.EditorAssetLibrary.set_metadata_tag(asset, 'B2UE_StaticImportHash', fingerprint)
+            unreal.EditorAssetLibrary.save_loaded_asset(asset, only_if_is_dirty=True)
+        if paths:
+            cache_file = PAYLOAD['cache_file']
+            with open(cache_file + '.tmp', 'w', encoding='utf-8') as handle:
+                json.dump({'version': 1, 'fingerprint': fingerprint, 'assets': paths}, handle)
+            os.replace(cache_file + '.tmp', cache_file)
 
     if PAYLOAD['place_in_level']:
         subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
@@ -1623,9 +1812,7 @@ try:
                 actor = None
                 if entry['type'] == 'MESH':
                     asset = resolved.get(name)
-                    if asset is None:
-                        result['missing'].append(name)
-                    else:
+                    if asset is not None:
                         actor = subsystem.spawn_actor_from_object(
                             asset, entry['location'], entry['rotation'])
                 if actor is None:
@@ -1679,7 +1866,6 @@ try:
                     log('anim assign failed for %s: %s' % (name, error))
             spawned[name] = actor
             result['spawned'] += 1
-            result['skeletal'] += 1
 
         # 5) Rebuild the Blender parent hierarchy with attachments.
         # Sequencer keys an attached actor RELATIVE to its parent, so the two
@@ -2258,8 +2444,12 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
     remote execution enabled. Note: re-syncing rebuilds the LevelSequence
     from scratch - tracks added to it by hand are cleared"""
     bl_idname = "kelit_toolkit.usd_scene_sync"
-    bl_label = "Send Scene via USD"
+    bl_label = "Send to Unreal"
     bl_options = {'REGISTER'}
+
+    force_reimport: bpy.props.BoolProperty(
+        name="Force Geometry Reimport", default=False, options={'SKIP_SAVE'},
+        description="Bypass the unchanged-geometry cache for this send")
 
     source: bpy.props.EnumProperty(
         name="Source",
@@ -2306,16 +2496,25 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
     )
 
     include_skeletal: bpy.props.BoolProperty(
-        name="Skeletal Meshes + Animation",
-        description="Detect armatures in the selection and send them as "
-                    "SkeletalMesh assets (armature + skinned meshes + active "
-                    "action as AnimSequence), spawned in the level with their "
-                    "animation assigned",
+        name="Export Detected Rigs as Skeletal Meshes",
+        description="Automatically group each armature with its meshes. "
+                    "Disable only to export those meshes as static geometry in the current pose",
         default=True
     )
 
+    include_skeletal_animation: bpy.props.BoolProperty(
+        name="Skeletal Animation Clips",
+        description="Export detected bone and shape-key animation as AnimSequence assets. "
+                    "Disable to send only the skeletal mesh and skeleton. "
+                    "An active action uses its own frame range; otherwise the scene range is used",
+        default=True
+    )
+
+    show_rig_options: bpy.props.BoolProperty(name="Rig Options", default=False,
+                                           options={'SKIP_SAVE'})
+
     include_animation: bpy.props.BoolProperty(
-        name="Include Animation",
+        name="Scene Animation (Sequencer)",
         description="Bake the scene animation into a native Unreal LevelSequence "
                     "(one transform track per moving object) and send the active "
                     "camera as a CineCameraActor with a Camera Cuts track",
@@ -2416,9 +2615,9 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
             return cached[1]
 
         objects = self._resolve_objects(context)
-        skeletal_assets = []
+        skeletal_assets, static_objects = split_skeletal_assets(objects)
         if self.include_skeletal:
-            skeletal_assets, objects = split_skeletal_assets(objects)
+            objects = static_objects
         # the raw pool follows the chosen source (it used to always read the
         # selection, giving wrong skip counts in Export-collection mode)
         raw = collect_scene_objects(self._base_objects(context))
@@ -2426,6 +2625,7 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
             'mesh_count': sum(1 for o in objects if o.type == 'MESH'),
             'empty_count': sum(1 for o in objects if o.type == 'EMPTY'),
             'skeletal_names': [asset['name'] for asset in skeletal_assets],
+            'animated_rigs': sum(has_skeletal_animation(asset) for asset in skeletal_assets),
             'hidden': sum(1 for o in raw if not is_exportable(o)),
             'cache_skipped': sum(1 for o in raw
                                  if is_exportable(o) and is_cache_driven(o)),
@@ -2436,7 +2636,7 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
     # dialog options remembered per scene (saved in execute, restored here)
     REMEMBERED_OPTIONS = (
         'source', 'place_in_level', 'replace_existing', 'import_materials',
-        'material_source', 'two_sided', 'alpha_mode', 'include_skeletal', 'include_animation',
+        'material_source', 'two_sided', 'alpha_mode', 'include_skeletal', 'include_skeletal_animation', 'include_animation',
         'include_camera', 'camera_spawnable', 'preserve_hierarchy', 'key_mode',
     )
 
@@ -2450,7 +2650,13 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
                         setattr(self, name, stored)
                     except TypeError:
                         pass  # stored enum value no longer exists
-        return context.window_manager.invoke_props_dialog(self, width=400)
+        from . import ue_remote
+        try:
+            self._target_node = ue_remote.resolve_target()
+        except ue_remote.TargetSelectionError as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+        return context.window_manager.invoke_props_dialog(self, width=440)
 
     def _remember_options(self, context):
         settings = context.scene.kelit_toolkit_settings
@@ -2460,7 +2666,11 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
 
     def draw(self, context):
         layout = self.layout
+        target = getattr(self, '_target_node', None)
+        if target:
+            layout.label(text='Unreal: ' + target['project_name'], icon='LINKED')
         layout.prop(self, "source")
+        layout.prop(self, "force_reimport")
         layout.prop(self, "place_in_level")
         layout.prop(self, "replace_existing")
         layout.prop(self, "import_materials")
@@ -2469,8 +2679,22 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
             layout.prop(self, "two_sided")
             layout.prop(self, "alpha_mode")
 
+        summary = self._dialog_summary(context)
         layout.separator()
-        layout.prop(self, "include_skeletal")
+        if summary['skeletal_names']:
+            layout.label(text=f"{len(summary['skeletal_names'])} rig(s) detected automatically",
+                         icon='ARMATURE_DATA')
+            if self.include_skeletal:
+                row = layout.row()
+                row.enabled = bool(summary['animated_rigs'])
+                row.prop(self, "include_skeletal_animation")
+                if not summary['animated_rigs']:
+                    layout.label(text="No rig animation detected: mesh + skeleton only", icon='INFO')
+            else:
+                layout.label(text="Rigged meshes will be sent as static geometry", icon='ERROR')
+            layout.prop(self, "show_rig_options", toggle=True)
+            if self.show_rig_options:
+                layout.prop(self, "include_skeletal")
         layout.prop(self, "include_animation")
         if self.include_animation:
             row = layout.row()
@@ -2493,7 +2717,7 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         box.label(text=f"{summary['mesh_count']} mesh(es), "
                        f"{summary['empty_count']} empty/null(s)",
                   icon='OUTLINER_COLLECTION')
-        if summary['mesh_count'] == 0 and self.source == 'EXPORT_COLLECTION':
+        if summary['mesh_count'] == 0 and not summary['skeletal_names'] and self.source == 'EXPORT_COLLECTION':
             box.label(text="Empty: click another collection in the Outliner, or use Selection",
                       icon='ERROR')
         if summary['skeletal_names']:
@@ -2515,12 +2739,24 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         box.label(text="Requires: UE open + 'USD Importer' plugin", icon='INFO')
 
     def execute(self, context):
+        from . import ue_remote
+        try:
+            target = getattr(self, '_target_node', None) or ue_remote.resolve_target()
+        except ue_remote.TargetSelectionError as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+        self._target_node = target
         self._remember_options(context)
         wm = context.window_manager
         wm.progress_begin(0, 100)
+        self._timings = {}
+        started = time.perf_counter()
         try:
-            return self._execute_sync(context, wm)
+            with ue_remote.pin_editor(target):
+                return self._execute_sync(context, wm)
         finally:
+            self._timings['total_seconds'] = round(time.perf_counter() - started, 3)
+            print('B2UE_TIMINGS ' + json.dumps(self._timings, sort_keys=True))
             wm.progress_end()
             try:
                 context.workspace.status_text_set(None)
@@ -2536,10 +2772,12 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         print(f"[KelitToolkit] {label}")
 
     def _execute_sync(self, context, wm):
-        objects = self._resolve_objects(context)
+        all_objects = self._resolve_objects(context)
+        objects = all_objects
         skeletal_assets = []
         if self.include_skeletal:
             skeletal_assets, objects = split_skeletal_assets(objects)
+        all_objects = list(dict.fromkeys(objects + [o for a in skeletal_assets for o in a['objects']]))
         mesh_objects = [o for o in objects if o.type == 'MESH']
         if not mesh_objects and not skeletal_assets:
             if self.source == 'EXPORT_COLLECTION':
@@ -2550,6 +2788,14 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
                 self.report({'WARNING'}, "Nothing to send: select mesh objects first")
             return {'CANCELLED'}
 
+        from .material_graph import record_warnings
+        if self.import_materials and self.material_source == 'MASTER':
+            warnings = record_warnings(extract_material_data(collect_materials(all_objects)))
+            if warnings:
+                for warning in warnings:
+                    print('[KelitToolkit] ' + warning)
+                self.report({'ERROR'}, 'Unsupported materials: ' + '; '.join(warnings[:3]))
+                return {'CANCELLED'}
         settings = context.scene.kelit_toolkit_settings
         scene_name = get_scene_name()
         staging_dir = get_staging_dir()
@@ -2557,6 +2803,7 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         usd_path = os.path.join(staging_dir, f'{scene_name}.usd')
         script_path = os.path.join(staging_dir, f'{scene_name}_ue_import.py')
 
+        started = time.perf_counter()
         # 1) Export USD with kind tags + deterministic mesh prim names
         self._step(context, wm, 10, "exporting USD...")
         tagged = {'component': 0, 'group': 0}
@@ -2566,7 +2813,8 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
             try:
                 tagged, asset_hints, data_hints = export_usd_hierarchy(
                     usd_path, objects, self.import_materials,
-                    alpha_mode=self.alpha_mode, two_sided=self.two_sided)
+                    alpha_mode=self.alpha_mode, two_sided=self.two_sided,
+                    bake_material_uvs=self.import_materials and self.material_source == 'MASTER')
                 policies = ", ".join(f"{tagged.get(key, 0)} {key.replace('_', ' ')}"
                                      for key in ('single_sided', 'double_sided', 'masked', 'opaque')
                                      if tagged.get(key))
@@ -2580,12 +2828,20 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         self._step(context, wm, 25, "USD exported")
 
         # 1b) One USD per skeletal asset (armature + skinned meshes + action)
+        from .sync_cache import skeletal_material_order, static_fingerprint, cache_path
         skeletal_payload = []
+        material_names = {}
+        for asset in skeletal_assets:
+            for material in collect_materials(asset['objects']):
+                key = sanitize_prim_name(material.name)
+                material_names[key + '_M' if re.search(r'\d$', key) else key] = material.name
         for asset in skeletal_assets:
             asset_name = sanitize_prim_name(asset_filename(asset))
             skel_path = os.path.join(staging_dir, f'{scene_name}_{asset_name}.usd')
             try:
-                export_skeletal_usd(skel_path, asset)
+                with_animation = self.include_skeletal_animation and has_skeletal_animation(asset)
+                export_skeletal_usd(skel_path, asset, include_animation=with_animation,
+                                    bake_material_uvs=self.import_materials and self.material_source == 'MASTER')
             except RuntimeError as error:
                 self.report({'ERROR'}, f"Skeletal USD export failed ({asset['name']}): {error}")
                 return {'CANCELLED'}
@@ -2595,11 +2851,16 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
                 'name': asset['name'],
                 'asset_name': asset_name,
                 'usd_file': skel_path.replace('\\', '/'),
+                'include_animation': with_animation,
+                'material_slots': skeletal_material_order(skel_path, material_names),
                 'location': convert_blender_to_unreal_location(location),
                 'rotation': convert_blender_rotation_to_unreal_rotation(euler),
                 'scale': list(scale),
             })
 
+        self._timings['export_seconds'] = round(time.perf_counter() - started, 3)
+        from .material_graph import uv_signatures
+        uv_plans = uv_signatures(all_objects, extract_material_data(collect_materials(all_objects))) if self.import_materials and self.material_source == 'MASTER' else {}
         # 2) Build the payload + Unreal-side script
         graph = build_scene_graph(objects)
         for entry in graph:
@@ -2616,7 +2877,15 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         scene = context.scene
         payload = {
             'usd_file': usd_path.replace('\\', '/') if usd_path else None,
+            # Native USD materials also depend on external texture bytes;
+            # their importer must run even when the USD layer is unchanged.
+            'static_fingerprint': static_fingerprint(usd_path) if usd_path and
+                                  (self.material_source == 'MASTER' or not self.import_materials) else '',
+            'cache_file': cache_path(staging_dir, self._target_node['project_root'], content_root, scene_name),
+            'force_reimport': self.force_reimport,
             'skeletal': skeletal_payload,
+            'uv_signatures': uv_plans,
+            'rig_uv_signatures': {a['name']: json.dumps({o.name: uv_plans[o.name] for o in a['objects'] if uv_plans.get(o.name)}, sort_keys=True) for a in skeletal_assets},
             # the USD importer creates a '<scene_name>/' sub-folder by itself
             'content_folder': content_root,
             'scene_name': scene_name,
@@ -2691,10 +2960,12 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
         # 3) Run it in the Unreal Editor through the remote-execution channel
         self._step(context, wm, 55,
                    "sending to Unreal (import + placement, this can take a while)...")
+        started = time.perf_counter()
         script_fwd = script_path.replace('\\', '/')
         success, output = run_unreal_python([
             f'exec(compile(open("{script_fwd}", encoding="utf-8").read(), "b2ue_usd_sync", "exec"))'
         ])
+        self._timings['unreal_import_rpc_seconds'] = round(time.perf_counter() - started, 3)
         self._step(context, wm, 90, "Unreal answered, reading the result...")
 
         if not success:
@@ -2727,8 +2998,10 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
             message = (f"{result.get('assets', 0)} asset(s), "
                        f"{result.get('spawned', 0)} actor(s) placed, "
                        f"{result.get('attached', 0)} attached")
+            if result.get('static_reused'):
+                message += f", {result['static_reused']} mesh(es) reused"
             if result.get('skeletal'):
-                message += f", {result['skeletal']} skeletal (anim)"
+                message += f", {result['skeletal']} skeletal"
             if result.get('two_sided_fixed'):
                 message += f", {result['two_sided_fixed']} two-sided fix"
             if result.get('sequence'):
@@ -2738,16 +3011,19 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
             if missing:
                 message += f" - {len(missing)} mesh(es) not matched (see console)"
                 print(f"USD Scene Sync - unmatched meshes: {missing}")
-            if self.import_materials and self.material_source == 'MASTER' and mesh_objects:
+            if self.import_materials and self.material_source == 'MASTER' and collect_materials(all_objects):
                 self._step(context, wm, 95, "building the material instances...")
                 from .ue_materials import build_material_instances
+                started = time.perf_counter()
                 built, material_message, _data = build_material_instances(
-                    context, objects, two_sided=self.two_sided, alpha_mode=self.alpha_mode)
+                    context, all_objects, two_sided=self.two_sided, alpha_mode=self.alpha_mode,
+                    skeletal_paths=result.get('skeletal_paths', {}))
+                self._timings['materials_seconds'] = round(time.perf_counter() - started, 3)
                 message += " - " + material_message
                 if not built:
                     self.report({'WARNING'}, message)
                     return {'FINISHED'}
-            self.report({'INFO'}, message)
+            self.report({'WARNING'} if missing else {'INFO'}, message)
         else:
             self.report({'INFO'}, f"Sync sent ({len(mesh_objects)} meshes, "
                                   f"{len(skeletal_payload)} skeletal) - check the UE Output Log")

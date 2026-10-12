@@ -14,12 +14,16 @@ from . import unreal_link
 from . import usd_sync
 from . import ue_materials
 from . import report
+from . import scene_weight
+from . import ai_optimize
 from . import split_merge
 from . import auto_clean
 
 
 def register():
     report.register()
+    scene_weight.register()
+    ai_optimize.register()
     split_merge.register()
     auto_clean.register()
     instances.register()
@@ -53,4 +57,6 @@ def unregister():
     instances.unregister()
     auto_clean.unregister()
     split_merge.unregister()
+    ai_optimize.unregister()
+    scene_weight.unregister()
     report.unregister()

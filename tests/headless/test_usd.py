@@ -86,7 +86,7 @@ tagged, meshes, shaders = export()
 t.check('default_single_sided', all(not m.GetDoubleSidedAttr().Get() for m in meshes.values())
         and tagged.get('single_sided', 0) == 2, tagged)
 t.check('default_cutout', opacity_state(shaders['M_Cutout']) == (True, 0.5), opacity_state(shaders['M_Cutout']))
-t.check('default_blended_translucent', opacity_state(shaders['M_Glass']) == (True, None),
+t.check('default_blended_masked', opacity_state(shaders['M_Glass']) == (True, 0.5),
         opacity_state(shaders['M_Glass']))
 t.check('kinds_tagged', tagged.get('component') == 2)
 
@@ -112,7 +112,7 @@ t.check('records_have_opacity', 'texture' in records['M_Cutout'].get('opacity', 
 policies = ue_materials.apply_material_policies_to_records(
     usd_sync.extract_material_data([cutout, glass]), 'OFF', 'AUTO')
 t.check('policy_auto', policies['M_Cutout']['blend'] == 'MASKED'
-        and policies['M_Glass']['blend'] == 'TRANSLUCENT'
+        and policies['M_Glass']['blend'] == 'MASKED'
         and policies['M_Cutout']['two_sided'] is False)
 policies = ue_materials.apply_material_policies_to_records(
     usd_sync.extract_material_data([cutout, glass]), 'BLENDER', 'OPAQUE')

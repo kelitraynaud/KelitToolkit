@@ -223,6 +223,71 @@ from the repository, remove the zip-installed copy so only one version runs.
 
 ## Versioning
 
+**0.9.3**:
+
+New tools
+
+- **Auto Clean**: the main cleanup tools chained in the right order (merge
+  duplicate materials, unused empties, material splits, repeated parts,
+  duplicates to instances, rotation and scale, origins, names, validation),
+  with a preview of what each step touches, remembered options and one undo
+  step. The parent hierarchy is kept by default (or turned into collections).
+- **Optimize AI Meshes**: batch Collapse decimation of AI-generated props
+  (Meshy, Tripo, Hunyuan...) to a face budget per square metre, one pass per
+  shared mesh, non-destructive by default (KT_Optimize modifier and a Remove
+  button), optional Apply and UV border protection. **Mark as Hero** sets a
+  minimum ratio for objects seen up close.
+- **Scene Weight Report**: triangles and texture memory at render time
+  (hidden but rendered objects counted, render-disabled collections skipped,
+  shared meshes counted once), with alerts on heavy subdivisions of small
+  objects.
+- **Merge Duplicate Materials** and **Merge Duplicate Images**: merge by
+  content, whatever the names (colour space and alpha mode kept apart for
+  images).
+- **Rejoin Material Splits** and **Split Repeated Parts**: objects cut per
+  material by an export are joined back; elements repeated inside one mesh
+  come out as instances.
+- **Rescale Rig + Animation**: rescales a rig, its skinned meshes and every
+  bone position key by one factor, scale applied, import empties removed.
+- **Fix Bone Lengths**: shortens out-of-proportion bones and brings stray
+  end joints back, orientation and animation unchanged.
+- **Report window** for Validate, Auto Clean and the reports above: full
+  list, click a line to select its object, copy to clipboard.
+- **Choose Project**: picks which running Unreal project receives the
+  commands.
+
+Send to Unreal
+
+- Materials are built on the Kelit master material by default: one instance
+  per Blender material, opacity as cutout, per-instance blend mode and
+  two-sided overrides, texture settings (normal maps flipped for Unreal).
+- **Two-Sided** and **Alpha** options: single-sided and cutout by default,
+  translucent only for materials set to Blended in Blender.
+- Collection mode uses the active collection when there is no 'Export'
+  collection, and says which one it sends.
+- Static geometry import cache, material graph and UV transforms, active UV
+  ordering, RGBA masks, skeletal animation and rig options.
+- Fixed actors placed with an empty mesh: freshly imported meshes are found
+  through the asset registry.
+- Detect Duplicates handles positions baked into the meshes and compares
+  materials by content.
+
+Fixes
+
+- Skeletal export no longer moves a mesh parented to another mesh twice.
+- Origin presets keep parented objects in place; UCX hulls the evaluated
+  shape; snake case keeps LOD tags; Apply Scale refuses zero scale.
+- Connection Doctor reports write errors (read-only project files) instead
+  of failing, and opens only when no editor answered.
+- Focus distance measured along the view axis, like Blender.
+- Material and image deletions switch Material Preview / Rendered viewports
+  to Solid meanwhile (EEVEE could crash).
+- Every operator id moved to kelit_toolkit.* (another add-on registered the
+  same id) and the scene settings to kelit_toolkit_settings: settings saved
+  by older versions are not carried over.
+- The test suite runs with an isolated Blender configuration and can no
+  longer touch the user's preferences.
+
 **0.9.2**: safety release. The animated-focus track shipped in 0.9.1 could
 crash Unreal's Sequencer when the synced sequence was opened (a UE 5.8
 limitation on python-authored focus tracks). The track is no longer created;

@@ -38,6 +38,15 @@ from ..operators.materials import (
     OBJECT_OT_delete_unused_materials,
     OBJECT_OT_purge_unused_materials,
     OBJECT_OT_merge_duplicate_materials,
+    OBJECT_OT_merge_duplicate_images,
+)
+from ..operators.ai_optimize import (
+    OBJECT_OT_optimize_ai_meshes,
+    OBJECT_OT_remove_ai_optimize,
+    OBJECT_OT_mark_ai_hero,
+)
+from ..operators.scene_weight import (
+    OBJECT_OT_scene_weight_report,
 )
 from ..operators.material_conversion import (
     OBJECT_OT_convert_to_simple_pbr,
@@ -70,6 +79,8 @@ from ..operators.export import (
     OBJECT_OT_apply_scale_instances,
     OBJECT_OT_apply_rotation_instances,
     OBJECT_OT_normalize_scene_scale,
+    OBJECT_OT_rescale_rig_animation,
+    OBJECT_OT_fix_bone_lengths,
     OBJECT_OT_bake_camera_animation,
     OBJECT_OT_batch_fbx_export,
 )
@@ -116,11 +127,15 @@ from ..operators import (
     usd_sync as _m_usd_sync,
     ue_materials as _m_ue_materials,
     auto_clean as _m_auto_clean,
+    scene_weight as _m_scene_weight,
+    ai_optimize as _m_ai_optimize,
     split_merge as _m_split_merge,
 )
 
 SEARCH_SECTIONS = (
     (_m_auto_clean, 'Clean · Auto Clean'),
+    (_m_scene_weight, 'Clean · Scene'),
+    (_m_ai_optimize, 'Prepare · Mesh'),
     (_m_split_merge, 'Prepare · Instances'),
     (_m_usd_sync, 'Send · USD'),
     (_m_unified_export, 'Send · Export'),
@@ -242,13 +257,19 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
         col = box.column(align=True)
         col.scale_y = 1.5
         col.operator(UNREAL_OT_usd_scene_sync.bl_idname,
-                     text="Send to Unreal (USD)", icon='EXPORT')
+                     text="Send to Unreal", icon='EXPORT')
+        box.operator(UNREAL_OT_build_material_instances.bl_idname,
+                     text="Update Materials Only", icon='MATERIAL')
 
         sub = box.box()
-        sub.label(text="Static + Skeletal (anim) auto-detected", icon='INFO')
+        sub.label(text="Static / skeletal meshes detected automatically", icon='INFO')
         sub.label(text="Sends the selection, or a collection (see the dialog)")
 
         box.prop(settings, "usd_content_folder")
+        row = box.row(align=True)
+        target = settings.ue_target_project.replace('\\', '/').rstrip('/').rsplit('/', 1)[-1]
+        row.label(text='Unreal: ' + (target or 'Automatic (one editor)'), icon='LINKED')
+        row.operator('kelit_toolkit.choose_unreal_project', text='Choose Project')
 
         box.operator(UNREAL_OT_export_assets.bl_idname,
                      text="Export Files Instead (USD / FBX)", icon='FILE_TICK')
@@ -277,8 +298,6 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
         col = box.column(align=True)
         col.operator(UNREAL_OT_usd_make_spawnable.bl_idname,
                      text="Make Sequence Self-Contained", icon='SEQUENCE')
-        col.operator(UNREAL_OT_build_material_instances.bl_idname,
-                     text="Build Material Instances", icon='MATERIAL')
         box.prop(settings, "ue_master_material")
 
         box.separator()
@@ -313,6 +332,10 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
                      text="Apply Rotation", icon='ORIENTATION_GIMBAL')
         col.operator(OBJECT_OT_normalize_scene_scale.bl_idname,
                      text="Normalize Scene Scale", icon='FULLSCREEN_ENTER')
+        col.operator(OBJECT_OT_rescale_rig_animation.bl_idname,
+                     text="Rescale Rig + Animation", icon='ARMATURE_DATA')
+        col.operator(OBJECT_OT_fix_bone_lengths.bl_idname,
+                     text="Fix Bone Lengths", icon='BONE_DATA')
         col.operator(OBJECT_OT_bake_camera_animation.bl_idname,
                      text="Bake Camera Animation", icon='CAMERA_DATA')
 
@@ -355,6 +378,11 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
                      text="Enhance Low Poly", icon='SMOOTHCURVE')
         col.operator(OBJECT_OT_convert_to_low_poly.bl_idname,
                      text="High to Low Poly (Bake)", icon='MOD_REMESH')
+        row = col.row(align=True)
+        row.operator(OBJECT_OT_optimize_ai_meshes.bl_idname,
+                     text="Optimize AI Meshes", icon='MOD_DECIM')
+        row.operator(OBJECT_OT_mark_ai_hero.bl_idname, text="", icon='SOLO_ON')
+        row.operator(OBJECT_OT_remove_ai_optimize.bl_idname, text="", icon='X')
         col.operator(OBJECT_OT_create_collision_mesh.bl_idname,
                      text="Create Collision Mesh", icon='MESH_ICOSPHERE')
         col.operator(OBJECT_OT_generate_lods.bl_idname,
@@ -418,10 +446,14 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
                      text="Purge Unused Materials", icon='CANCEL')
         col.operator(OBJECT_OT_merge_duplicate_materials.bl_idname,
                      text="Merge Duplicate Materials", icon='DUPLICATE')
+        col.operator(OBJECT_OT_merge_duplicate_images.bl_idname,
+                     text="Merge Duplicate Images", icon='IMAGE_DATA')
 
         box.separator()
         box.label(text="Scene Cleanup:")
         col = box.column(align=True)
+        col.operator(OBJECT_OT_scene_weight_report.bl_idname,
+                     text="Scene Weight Report", icon='SORTSIZE')
         col.operator(OBJECT_OT_delete_hidden_objects.bl_idname,
                      text="Delete Hidden Objects", icon='RESTRICT_VIEW_ON')
         col.operator(OBJECT_OT_delete_unused_empties.bl_idname,

@@ -103,11 +103,7 @@ t.check('update_repo_registered', repo is not None
 bpy.ops.kelit_toolkit.setup_update_repo()
 t.check('update_repo_idempotent', len(repos) == before + (0 if pre_existing else 1))
 if not pre_existing and repo is not None:
-    repos.remove(repo)
-    try:
-        bpy.ops.wm.save_userpref()
-    except Exception:
-        pass
+    repos.remove(repo)   # in memory only: never save preferences from a test
 t.check('update_repo_prefs_restored',
         pre_existing or settings_mod.find_update_repo(bpy.context) is None)
 

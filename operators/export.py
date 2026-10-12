@@ -807,11 +807,357 @@ class OBJECT_OT_batch_fbx_export(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def rig_actions(armature):
+    """Every action the armature plays: the active one and its NLA strips."""
+    actions = []
+    anim = armature.animation_data
+    if anim is not None:
+        if anim.action is not None:
+            actions.append(anim.action)
+        for track in anim.nla_tracks:
+            for strip in track.strips:
+                if strip.action is not None and strip.action not in actions:
+                    actions.append(strip.action)
+    return actions
+
+
+def scale_fcurve(fcurve, factor):
+    for key in fcurve.keyframe_points:
+        key.co.y *= factor
+        key.handle_left.y *= factor
+        key.handle_right.y *= factor
+    fcurve.update()
+
+
+def fix_bone_lengths(context, armature, ratio=2.0):
+    """Shorten bones whose length is out of proportion (glTF/FBX imports
+    guess bone tails and fingertips come out metres long). Only the length
+    changes: head, direction and roll stay, so the bone's orientation, the
+    skinning and every animation are untouched. Bones with a connected child
+    are left alone (their tail is that child's head). Returns the count."""
+    # bones that deform something: an end bone with no weight anywhere can
+    # be moved freely, nothing on screen depends on its position
+    weighted = set()
+    for obj in context.scene.objects:
+        if obj.type != 'MESH' or not any(
+                m.type == 'ARMATURE' and m.object == armature for m in obj.modifiers):
+            continue
+        names = {group.index: group.name for group in obj.vertex_groups}
+        for vertex in obj.data.vertices:
+            for element in vertex.groups:
+                if element.weight > 1e-4:
+                    weighted.add(names.get(element.group))
+
+    previous_active = context.view_layer.objects.active
+    context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='EDIT')
+    fixed = 0
+    try:
+        bones = armature.data.edit_bones
+        lengths = sorted(bone.length for bone in bones)
+        median = lengths[len(lengths) // 2] if lengths else 0.0
+
+        moved = []
+        # 1) stray end joints: an unweighted end bone sitting far away from
+        # its parent (fingertip joints exported metres off) comes back to the
+        # end of its parent, along the parent's direction, one segment away
+        for bone in bones:
+            parent = bone.parent
+            if bone.children or parent is None or bone.name in weighted or bone.use_connect:
+                continue
+            segment = (parent.head - parent.parent.head).length if parent.parent else parent.length
+            segment = segment if segment > 1e-6 else median
+            if (bone.head - parent.head).length <= ratio * max(segment, median):
+                continue
+            # along the PARENT's own axis: the parent (which does deform) then
+            # only needs a shorter length in step 2, never a new orientation,
+            # which would change how its animation bends the mesh
+            axis = (parent.tail - parent.head).normalized()
+            roll = bone.roll
+            bone.head = parent.head + axis * segment
+            bone.tail = bone.head + axis * segment * 0.75
+            bone.roll = roll
+            moved.append(bone.name)
+            fixed += 1
+
+        def limits(bone):
+            """(threshold, corrected length) for this bone, or None."""
+            axis = (bone.tail - bone.head).normalized()
+            ahead = [child.head - bone.head for child in bone.children]
+            ahead = [vec.dot(axis) for vec in ahead if vec.length > 1e-6
+                     and vec.normalized().dot(axis) > 0.7]
+            if ahead:
+                # a bone pointing at its child should end there
+                return min(ahead), min(ahead)
+            if bone.children or bone.parent is None:
+                return None
+            # end bone: only an outlier against both its parent and the
+            # rig's typical bone (a spine longer than the pelvis is normal),
+            # then sized after its parent like the rest of the chain
+            return max(bone.parent.length, median), bone.parent.length * 0.75
+
+        # parents first, so an end bone leans on its parent's corrected length
+        def depth(bone):
+            return len(bone.parent_recursive)
+
+        for bone in sorted(bones, key=depth):
+            if any(child.use_connect for child in bone.children):
+                continue
+            found = limits(bone)
+            if found is None:
+                continue
+            threshold, target = found
+            if target > 1e-6 and bone.length > ratio * threshold:
+                bone.length = target
+                fixed += 1
+    finally:
+        bpy.ops.object.mode_set(mode='OBJECT')
+        context.view_layer.objects.active = previous_active
+
+    # the animation of a stray joint keeps translating it out to where the
+    # file had put it (the fingertips kept flying after the rest fix). Those
+    # bones deform nothing: their position keys are dropped, they now ride
+    # at the end of their phalanx; rotation keys stay
+    paths = {f'pose.bones["{name}"].location' for name in moved}
+    for action in rig_actions(armature):
+        for layer in getattr(action, 'layers', []):
+            for strip in layer.strips:
+                for bag in strip.channelbags:
+                    for fcurve in [fc for fc in bag.fcurves if fc.data_path in paths]:
+                        bag.fcurves.remove(fcurve)
+    for name in moved:
+        armature.pose.bones[name].location = (0.0, 0.0, 0.0)
+    return fixed
+
+
+class OBJECT_OT_fix_bone_lengths(bpy.types.Operator):
+    """Shorten bones that are far too long for their place in the rig
+    (fingertips several metres long after a glTF or FBX import). Only the
+    length changes: orientation, skinning and animations stay exactly the
+    same, Unreal reads joints only"""
+    bl_idname = "kelit_toolkit.fix_bone_lengths"
+    bl_label = "Fix Bone Lengths"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    ratio: bpy.props.FloatProperty(
+        name="Too Long Beyond",
+        description="A bone is shortened when it is this many times longer than "
+                    "the distance to its child (or its parent's length for end bones)",
+        default=2.0, min=1.1, max=20.0
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and any(
+            obj.type == 'ARMATURE' for obj in context.selected_objects)
+
+    def execute(self, context):
+        fixed = 0
+        rigs = [obj for obj in context.selected_objects
+                if obj.type == 'ARMATURE' and obj.library is None]
+        for armature in rigs:
+            fixed += fix_bone_lengths(context, armature, self.ratio)
+        self.report({'INFO'}, f"{fixed} bone(s) shortened on {len(rigs)} rig(s)")
+        return {'FINISHED'}
+
+
+class OBJECT_OT_rescale_rig_animation(bpy.types.Operator):
+    """Rescale a rigged character and its animations by one factor, with the
+    scale applied: bones, skinned meshes and every bone position key are
+    multiplied, so the rig ends at scale 1.0 at the new size. Typical use: an
+    FBX in centimetres read as metres (factor 0.01). Rotations and bone scale
+    keys are unit-free and stay as they are"""
+    bl_idname = "kelit_toolkit.rescale_rig_animation"
+    bl_label = "Rescale Rig + Animation"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    factor: bpy.props.FloatProperty(
+        name="Factor",
+        description="Multiply sizes and positions by this value (0.01 = divide by 100)",
+        default=0.01, min=0.000001, soft_min=0.001, soft_max=1000.0, precision=4
+    )
+    remove_parent_empties: bpy.props.BoolProperty(
+        name="Remove Parent Empties",
+        description="Delete the empties the import put above the armature (RootNode, "
+                    "the .fbx node...), keeping its world placement. Empties that "
+                    "still hold other objects are kept",
+        default=True
+    )
+    fix_lengths: bpy.props.BoolProperty(
+        name="Fix Bone Lengths",
+        description="Also shorten bones far too long for their place in the rig "
+                    "(display only: orientation and animation are untouched)",
+        default=True
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and bool(context.selected_objects)
+
+    def _armatures(self, context):
+        found = []
+        for obj in context.selected_objects:
+            candidates = [obj] if obj.type == 'ARMATURE' else []
+            if obj.type == 'MESH':
+                candidates += [m.object for m in obj.modifiers
+                               if m.type == 'ARMATURE' and m.object is not None]
+                if obj.parent is not None and obj.parent.type == 'ARMATURE':
+                    candidates.append(obj.parent)
+            if obj.type == 'EMPTY':
+                candidates += [c for c in obj.children_recursive if c.type == 'ARMATURE']
+            for armature in candidates:
+                if armature not in found and armature.library is None:
+                    found.append(armature)
+        return found
+
+    @staticmethod
+    def _skinned_meshes(context, armature):
+        meshes = []
+        for obj in context.scene.objects:
+            if obj.type != 'MESH' or obj.library is not None:
+                continue
+            if obj.parent == armature or any(
+                    m.type == 'ARMATURE' and m.object == armature for m in obj.modifiers):
+                meshes.append(obj)
+        return meshes
+
+    def invoke(self, context, event):
+        if not self._armatures(context):
+            self.report({'WARNING'}, "Select an armature, or a mesh skinned to one")
+            return {'CANCELLED'}
+        return context.window_manager.invoke_props_dialog(self, width=380)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "factor")
+        layout.prop(self, "remove_parent_empties")
+        layout.prop(self, "fix_lengths")
+        for armature in self._armatures(context)[:4]:
+            meshes = self._skinned_meshes(context, armature)
+            layout.label(text=f"{armature.name}: {len(meshes)} mesh(es), "
+                              f"{len(rig_actions(armature))} action(s)", icon='ARMATURE_DATA')
+
+    def _apply_scale(self, context, obj):
+        for other in context.view_layer.objects:
+            other.select_set(False)
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+    def _remove_parent_empties(self, armature, meshes):
+        """Unparent the armature (world kept) and delete the empty ancestors
+        left without any other content."""
+        ancestors = []
+        parent = armature.parent
+        while parent is not None:
+            if parent.type != 'EMPTY':
+                return 0
+            ancestors.append(parent)
+            parent = parent.parent
+        if not ancestors:
+            return 0
+        world = armature.matrix_world.copy()
+        armature.parent = None
+        armature.matrix_world = world
+        removed = 0
+        for empty in ancestors:   # deepest first
+            if any(child.type != 'EMPTY' for child in empty.children_recursive):
+                break
+            for child in list(empty.children):
+                child_world = child.matrix_world.copy()
+                child.parent = empty.parent
+                child.matrix_world = child_world
+            bpy.data.objects.remove(empty, do_unlink=True)
+            removed += 1
+        return removed
+
+    def execute(self, context):
+        armatures = self._armatures(context)
+        if not armatures:
+            self.report({'WARNING'}, "Select an armature, or a mesh skinned to one")
+            return {'CANCELLED'}
+        factor = self.factor
+        previous_frame = context.scene.frame_current
+        previous_selection = [obj.name for obj in context.selected_objects]
+        context.scene.frame_set(context.scene.frame_start)
+
+        report = {'rigs': 0, 'meshes': 0, 'curves': 0, 'empties': 0, 'skipped': []}
+        done_actions = set()
+        try:
+            for armature in armatures:
+                meshes = self._skinned_meshes(context, armature)
+                shared = [m for m in meshes if len(mesh_users(m.data)) > 1]
+                if shared:
+                    report['skipped'].append(f"{armature.name} (shared mesh {shared[0].name})")
+                    continue
+                if self.remove_parent_empties:
+                    report['empties'] += self._remove_parent_empties(armature, meshes)
+
+                # scale about the armature's parent-space origin: local
+                # position and scale grow by the factor, object keys follow
+                armature.location *= factor
+                armature.scale *= factor
+                actions = rig_actions(armature)
+                for action in actions:
+                    for fcurve in iter_action_fcurves(action):
+                        if fcurve.data_path == 'location' and action.name not in done_actions:
+                            scale_fcurve(fcurve, factor)
+                            report['curves'] += 1
+                context.view_layer.update()
+
+                # bake the armature's scale into its bones; bone position keys
+                # are in bone space, so they take the whole applied scale
+                applied = armature.scale.copy()
+                if max(applied) - min(applied) > 1e-6 * max(applied):
+                    report['skipped'].append(f"{armature.name} (non-uniform scale)")
+                    continue
+                child_worlds = {m.name: m.matrix_world.copy() for m in meshes}
+                self._apply_scale(context, armature)
+                for action in actions:
+                    if action.name in done_actions:
+                        continue
+                    done_actions.add(action.name)
+                    for fcurve in iter_action_fcurves(action):
+                        if fcurve.data_path.startswith('pose.bones[') and \
+                                fcurve.data_path.endswith('].location'):
+                            scale_fcurve(fcurve, applied.x)
+                            report['curves'] += 1
+                context.view_layer.update()
+
+                # skinned meshes: keep their (now smaller) world placement,
+                # then bake their own scale into the vertices
+                for mesh in meshes:
+                    mesh.matrix_world = child_worlds[mesh.name]
+                    context.view_layer.update()
+                    self._apply_scale(context, mesh)
+                    report['meshes'] += 1
+                if self.fix_lengths:
+                    report['bones'] = report.get('bones', 0) + fix_bone_lengths(context, armature)
+                report['rigs'] += 1
+        finally:
+            for obj in context.view_layer.objects:
+                obj.select_set(obj.name in previous_selection)
+            context.scene.frame_set(previous_frame)
+
+        message = (f"Rescaled x{factor:g}: {report['rigs']} rig(s), {report['meshes']} mesh(es), "
+                   f"{report['curves']} position curve(s)")
+        if report['empties']:
+            message += f", {report['empties']} parent empty(ies) removed"
+        if report.get('bones'):
+            message += f", {report['bones']} bone length(s) fixed"
+        if report['skipped']:
+            message += " - skipped: " + ", ".join(report['skipped'])
+        self.report({'WARNING'} if report['skipped'] else {'INFO'}, message)
+        return {'FINISHED'} if report['rigs'] else {'CANCELLED'}
+
+
 classes = (
     OBJECT_OT_validate_for_unreal,
     OBJECT_OT_apply_scale_instances,
     OBJECT_OT_apply_rotation_instances,
     OBJECT_OT_normalize_scene_scale,
+    OBJECT_OT_rescale_rig_animation,
+    OBJECT_OT_fix_bone_lengths,
     OBJECT_OT_bake_camera_animation,
     OBJECT_OT_apply_all_transforms,
     OBJECT_OT_batch_fbx_export,
