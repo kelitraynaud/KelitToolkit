@@ -3,7 +3,10 @@
 import bpy
 import mathutils
 from collections import defaultdict
-from ..utils import clean_name, material_fingerprint
+from ..utils import (ROTATION_MIN_CONFIDENCE, canonical_frames, clean_name,
+                     find_rigid_match, material_fingerprint, mesh_surface_arrays,
+                     natural_axes, numpy_to_matrix3, rigid_match_tolerance,
+                     shape_invariant_key)
 
 
 class OBJECT_OT_replace_with_active_instance(bpy.types.Operator):
@@ -168,6 +171,14 @@ class OBJECT_OT_detect_and_replace_instances(bpy.types.Operator):
         default=True
     )
 
+    rotated_copies: bpy.props.BoolProperty(
+        name="Rotated Copies",
+        description="Also match copies turned inside their mesh (rotation baked into the "
+                    "vertices). Works with Positions Baked in Mesh; each instance gets "
+                    "the rotation that puts it exactly where the original was",
+        default=True
+    )
+
     compare_materials: bpy.props.EnumProperty(
         name="Materials",
         description="What makes two materials 'the same' for the comparison",
@@ -195,7 +206,8 @@ class OBJECT_OT_detect_and_replace_instances(bpy.types.Operator):
         """Duplicate groups for the current options, cached per option set so
         the dialog can redraw freely (a redo panel re-instantiates the
         operator without invoke: getattr with defaults everywhere)."""
-        key = (self.search_scope, self.baked_positions, self.compare_materials)
+        key = (self.search_scope, self.baked_positions, self.compare_materials,
+               getattr(self, 'rotated_copies', True))
         cached = getattr(self, '_scan_cache', None)
         if cached is not None and cached[0] == key:
             return cached[1]
@@ -235,6 +247,9 @@ class OBJECT_OT_detect_and_replace_instances(bpy.types.Operator):
 
         # Options (the counts above follow them)
         layout.prop(self, "baked_positions")
+        row = layout.row()
+        row.enabled = self.baked_positions
+        row.prop(self, "rotated_copies")
         layout.prop(self, "compare_materials")
         layout.prop(self, "rename_to_mesh")
 
@@ -287,11 +302,16 @@ class OBJECT_OT_detect_and_replace_instances(bpy.types.Operator):
                 # a translation inside the mesh: shift the instance by that
                 # delta (in its own local space) so the geometry lands exactly
                 # where the original's did
+                # With rotated copies the meshes also differ by a rotation:
+                # matrix_world @ T(c_obj) @ rotation @ T(-c_master)
                 new_matrix = obj.matrix_world.copy()
-                centroids = getattr(self, '_centroids', {})
-                if obj.name in centroids and master.name in centroids:
-                    delta = centroids[obj.name] - centroids[master.name]
-                    new_matrix = new_matrix @ mathutils.Matrix.Translation(delta)
+                placements = getattr(self, '_placements', {})
+                if obj.name in placements and master.name in placements:
+                    centroid, rotation = placements[obj.name]
+                    master_centroid = placements[master.name][0]
+                    new_matrix = (new_matrix @ mathutils.Matrix.Translation(centroid)
+                                  @ rotation.to_4x4()
+                                  @ mathutils.Matrix.Translation(-master_centroid))
                 new_obj.matrix_world = new_matrix
 
                 # Copy modifiers from original object to preserve them
@@ -414,16 +434,89 @@ class OBJECT_OT_detect_and_replace_instances(bpy.types.Operator):
                     if baked:
                         centroids[obj.name] = mesh_centroid(obj.data)
 
+        identity = mathutils.Matrix.Identity(3)
+        placements = {name: (centroid, identity) for name, centroid in centroids.items()}
+        groups = list(signature_groups.items())
+        if baked and getattr(self, 'rotated_copies', True):
+            groups = OBJECT_OT_detect_and_replace_instances._merge_rotated(groups, placements)
+
         # Filter groups that have more than one object (duplicates)
         # Convert back to a dict with the first mesh as key for display
         duplicate_groups = {}
-        for signature, objs in signature_groups.items():
+        for signature, objs in groups:
             if len(objs) > 1:
                 # Use the first object's mesh as the key
                 duplicate_groups[objs[0].data] = objs
 
         self._centroids = centroids
+        self._placements = placements
         return duplicate_groups
+
+    @staticmethod
+    def _merge_rotated(groups, placements):
+        """Merge the exact groups whose meshes are the same shape turned.
+        Candidates share topology, materials, UVs and the canonical
+        signature (or, when that one missed on a rounding boundary, a
+        coarse invariant key); each is verified vertex by vertex before it
+        is merged. Updates `placements` with each object's rotation."""
+        representatives = []
+        for signature, objs in groups:
+            points, normals, areas, centers = mesh_surface_arrays(objs[0].data)
+            if not len(points):
+                representatives.append(None)
+                continue
+            frame, confidence, _method = natural_axes(points, normals, areas, centers)
+            if confidence < ROTATION_MIN_CONFIDENCE:
+                representatives.append(None)
+                continue
+            canonical, rotations, centroid = canonical_frames(points, frame)
+            # everything but the raw vertex positions (index 3)
+            rest = signature[:3] + signature[4:]
+            representatives.append({
+                'points': points, 'rotation': rotations[0], 'centroid': centroid,
+                'keys': ((rest, 'exact', canonical),
+                         (rest, 'coarse', shape_invariant_key(points))),
+                'tolerance': rigid_match_tolerance(points)})
+
+        merged_into = list(range(len(groups)))
+        relative = {}            # group index -> rotation relative to its master
+        for key_index in (0, 1):
+            buckets = defaultdict(list)
+            for index, info in enumerate(representatives):
+                if info is not None and merged_into[index] == index:
+                    buckets[info['keys'][key_index]].append(index)
+            for members in buckets.values():
+                masters = []
+                for index in members:
+                    info = representatives[index]
+                    for master in masters:
+                        master_info = representatives[master]
+                        rotation, _mapping = find_rigid_match(
+                            master_info['points'], info['points'],
+                            master_info['rotation'], info['rotation'],
+                            master_info['centroid'], info['centroid'],
+                            max(master_info['tolerance'], info['tolerance']))
+                        if rotation is not None:
+                            merged_into[index] = master
+                            relative[index] = rotation
+                            break
+                    else:
+                        masters.append(index)
+
+        result = []
+        for index, (signature, objs) in enumerate(groups):
+            if merged_into[index] != index:
+                continue
+            members = list(objs)
+            for other, target in enumerate(merged_into):
+                if target != index or other == index:
+                    continue
+                rotation = numpy_to_matrix3(relative[other])
+                for obj in groups[other][1]:
+                    placements[obj.name] = (placements[obj.name][0], rotation)
+                members.extend(groups[other][1])
+            result.append((signature, members))
+        return result
 
 
 class OBJECT_OT_realize_modifiers_to_instances(bpy.types.Operator):
