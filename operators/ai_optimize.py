@@ -17,6 +17,9 @@ SEAM_GROUP = "KT_UVSeams"
 EXCLUDE_PROPERTY = "kt_optimize_exclude"
 HERO_PROPERTY = "kt_optimize_min_ratio"
 REFERENCE_PROPERTY = "kt_optimize_reference"
+# set on mesh data produced by a destructive Apply: such a mesh is already
+# decimated and must never be saved as the "_KT_Original" reference
+APPLIED_PROPERTY = "kt_optimize_applied"
 DEFORMING = {'ARMATURE', 'LATTICE', 'CURVE', 'HOOK', 'MESH_DEFORM', 'SURFACE_DEFORM',
              'CAST', 'SIMPLE_DEFORM', 'WARP', 'WAVE', 'LAPLACIANDEFORM', 'CORRECTIVE_SMOOTH'}
 
@@ -108,7 +111,13 @@ def find_candidates(objects, settings):
             continue
         world_area = max(world_surface_area(mesh, user, settings.get('unit_scale', 1.0), area)
                          for user in users)
-        density = faces / world_area if world_area > 1e-9 else float('inf')
+        if world_area <= 1e-9:
+            # zero scale (or a degenerate mesh): no surface means no budget,
+            # and an infinite density would decimate it to the minimum
+            for user in users:
+                skipped[user.name_full] = "zero scale or no surface"
+            continue
+        density = faces / world_area
         dense = tri_share >= settings['min_tri_share'] and density >= settings['density']
         existing = any(user.modifiers.get(MODIFIER_NAME) for user in users)
         if not (dense or faces >= settings['max_faces_absolute'] or existing):
@@ -157,13 +166,20 @@ def uv_seam_vertices(mesh):
 def protect_seams(plan):
     """Weight the UV border vertices in a vertex group the decimation leaves
     alone. Weights live on the shared mesh, the group on every user at the
-    same index; returns False when that cannot be guaranteed."""
+    same index; returns False when that cannot be guaranteed (and then
+    removes the groups it created, leaving the objects as they were)."""
     users = plan['users']
     indices = set()
+    created = []
     for user in users:
-        group = user.vertex_groups.get(SEAM_GROUP) or user.vertex_groups.new(name=SEAM_GROUP)
+        group = user.vertex_groups.get(SEAM_GROUP)
+        if group is None:
+            group = user.vertex_groups.new(name=SEAM_GROUP)
+            created.append((user, group))
         indices.add(group.index)
     if len(indices) != 1:
+        for user, group in created:
+            user.vertex_groups.remove(group)
         return False
     group = users[0].vertex_groups[SEAM_GROUP]
     vertices = uv_seam_vertices(plan['mesh'])
@@ -195,7 +211,10 @@ def ensure_reference(context, plan):
     source = plan['users'][0]
     reference = source.copy()
     reference.data = plan['mesh'].copy()
-    reference.name = source.name + '_KT_Original'
+    # a mesh baked by an earlier Apply is no longer the original: the copy is
+    # still a useful backup, but it must not pretend to be the source
+    decimated = bool(plan['mesh'].get(APPLIED_PROPERTY))
+    reference.name = source.name + ('_KT_Decimated' if decimated else '_KT_Original')
     reference.modifiers.clear()
     reference[EXCLUDE_PROPERTY] = True
     reference.hide_render = True
@@ -262,12 +281,14 @@ def apply_plan(context, plan, protected):
     if mesh.users == 0:
         bpy.data.meshes.remove(mesh)
     new_mesh.name = name
+    new_mesh[APPLIED_PROPERTY] = True
     return new_mesh
 
 
 def remove_optimization(objects):
     removed = 0
-    objects = list(objects)
+    # linked objects cannot be edited here (removing a modifier raised)
+    objects = [obj for obj in objects if obj.library is None]
     for obj in objects:
         modifier = obj.modifiers.get(MODIFIER_NAME) if obj.type == 'MESH' else None
         if modifier is not None and modifier.type == 'DECIMATE':

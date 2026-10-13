@@ -9,7 +9,8 @@ def viewports_to_solid(context):
     crashed Blender (EXCEPTION_ACCESS_VIOLATION in image_acquire_ibuf, from
     eevee MaterialModule::end_sync). Those viewports go to Solid for the
     operation and come back half a second later, once the deletion is
-    through. Returns the restore function (call it last)."""
+    through. Returns the restore function: call it in a ``finally`` so the
+    viewports come back even when the operation fails."""
     switched = []
     for window in context.window_manager.windows:
         for area in window.screen.areas:
@@ -33,6 +34,13 @@ def viewports_to_solid(context):
             return None
         bpy.app.timers.register(restore, first_interval=0.5)
     return restore_later
+
+
+def remove_datablocks(datablocks):
+    """bpy.data.batch_remove, in one place (the tests make it fail to check
+    that the viewports are restored whatever happens)."""
+    if datablocks:
+        bpy.data.batch_remove(datablocks)
 
 
 def find_duplicate_materials():
@@ -179,8 +187,10 @@ class OBJECT_OT_purge_unused_materials(bpy.types.Operator):
         # Remove unused materials (viewports in Solid meanwhile, see
         # viewports_to_solid: EEVEE crashed on deleted materials)
         restore_viewports = viewports_to_solid(context)
-        bpy.data.batch_remove(materials_to_remove)
-        restore_viewports()
+        try:
+            remove_datablocks(materials_to_remove)
+        finally:
+            restore_viewports()
 
         removed_count = len(materials_to_remove)
         remaining_count = len(bpy.data.materials)
@@ -230,20 +240,22 @@ class OBJECT_OT_merge_duplicate_materials(bpy.types.Operator):
         restore_viewports = viewports_to_solid(_context)
         merged = 0
         doomed = []
-        for group in groups:
-            keep = pick_material_to_keep(group)
-            copies = [material for material in group if material != keep]
-            replace_materials(copies, keep)
-            for copy in copies:
-                copy.user_remap(keep)
-                copy.use_fake_user = False
-                doomed.append(copy)
-                merged += 1
-            base = clean_name(keep.name)
-            if base != keep.name and base not in bpy.data.materials:
-                keep.name = base
-        bpy.data.batch_remove(doomed)
-        restore_viewports()
+        try:
+            for group in groups:
+                keep = pick_material_to_keep(group)
+                copies = [material for material in group if material != keep]
+                replace_materials(copies, keep)
+                for copy in copies:
+                    copy.user_remap(keep)
+                    copy.use_fake_user = False
+                    doomed.append(copy)
+                    merged += 1
+                base = clean_name(keep.name)
+                if base != keep.name and base not in bpy.data.materials:
+                    keep.name = base
+            remove_datablocks(doomed)
+        finally:
+            restore_viewports()
 
         self.report({'INFO'}, f"{merged} duplicate material(s) merged into {len(groups)}, "
                               f"{len(bpy.data.materials)} material(s) remaining")
@@ -275,19 +287,33 @@ def image_memory_bytes(image):
     return width * height * max(image.channels, 1) * (4 if image.is_float else 1)
 
 
-def find_duplicate_images():
+def _has_unsaved_pixels(image):
+    try:
+        return bool(image.is_dirty)
+    except Exception:
+        return False
+
+
+def find_duplicate_images(skipped=None):
     """Groups of images with identical content. Packed images are compared by
     their packed bytes, file images by size then a full-file md5. The colour
     space and alpha mode are part of the key: the same file read as sRGB and
-    as Non-Color is two different images. Linked, generated, tiled and
-    render/viewer images are left alone."""
+    as Non-Color is two different images. Linked, tiled and render/viewer
+    images are left alone. Generated images and images with unsaved painting
+    (is_dirty) are never merged: their pixels are not what is on disk. Pass a
+    list as `skipped` to collect those."""
     import hashlib
     import os
     candidates = []
     by_size = defaultdict(list)
     for image in bpy.data.images:
-        if (image.library is not None or image.type in SKIPPED_IMAGE_TYPES
-                or image.source != 'FILE'):
+        if image.library is not None or image.type in SKIPPED_IMAGE_TYPES:
+            continue
+        if image.source == 'GENERATED' or _has_unsaved_pixels(image):
+            if skipped is not None:
+                skipped.append(image)
+            continue
+        if image.source != 'FILE':
             continue
         settings = (image.colorspace_settings.name, image.alpha_mode)
         if image.packed_file is not None:
@@ -335,6 +361,12 @@ def _group_bytes(group):
     return total
 
 
+def _skipped_note(skipped):
+    if not skipped:
+        return ""
+    return f" ({len(skipped)} generated or unsaved image(s) skipped)"
+
+
 def _format_bytes(value):
     return f"{value / (1024 ** 3):.2f} GB" if value >= 1024 ** 3 else f"{value / (1024 ** 2):.0f} MB"
 
@@ -350,9 +382,10 @@ class OBJECT_OT_merge_duplicate_images(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def invoke(self, context, event):
-        self._groups = find_duplicate_images()
+        skipped = []
+        self._groups = find_duplicate_images(skipped)
         if not self._groups:
-            self.report({'INFO'}, "No duplicate images found")
+            self.report({'INFO'}, "No duplicate images found" + _skipped_note(skipped))
             return {'CANCELLED'}
         return context.window_manager.invoke_props_dialog(self, width=460)
 
@@ -370,35 +403,42 @@ class OBJECT_OT_merge_duplicate_images(bpy.types.Operator):
             box.label(text=f"  {pick_image_to_keep(group).name}: {len(group) - 1} copies")
         if len(groups) > 6:
             box.label(text=f"  ... and {len(groups) - 6} more")
+        skipped = []
+        find_duplicate_images(skipped)
+        if skipped:
+            layout.label(text=f"{len(skipped)} image(s) left alone (generated or unsaved painting)")
         layout.label(text="Applies to the whole file. The copies are deleted.")
 
     def execute(self, context):
-        groups = find_duplicate_images()
+        skipped = []
+        groups = find_duplicate_images(skipped)
         if not groups:
-            self.report({'INFO'}, "No duplicate images found")
+            self.report({'INFO'}, "No duplicate images found" + _skipped_note(skipped))
             return {'CANCELLED'}
         saved = sum(_group_bytes(group) for group in groups)
         restore_viewports = viewports_to_solid(context)
         doomed = []
-        for group in groups:
-            keep = pick_image_to_keep(group)
-            for image in group:
-                if image == keep:
-                    continue
-                image.user_remap(keep)
-                image.use_fake_user = False
-                doomed.append(image)
-            base = clean_name(keep.name)
-            if base != keep.name and base not in bpy.data.images:
-                keep.name = base
-        merged = len(doomed)
-        bpy.data.batch_remove(doomed)
-
-        restore_viewports()
+        try:
+            for group in groups:
+                keep = pick_image_to_keep(group)
+                for image in group:
+                    if image == keep:
+                        continue
+                    image.user_remap(keep)
+                    image.use_fake_user = False
+                    doomed.append(image)
+                base = clean_name(keep.name)
+                if base != keep.name and base not in bpy.data.images:
+                    keep.name = base
+            merged = len(doomed)
+            remove_datablocks(doomed)
+        finally:
+            restore_viewports()
 
         message = f"{merged} duplicate image(s) merged into {len(groups)}"
         if saved:
             message += f", about {_format_bytes(saved)} freed"
+        message += _skipped_note(skipped)
         self.report({'INFO'}, message)
         return {'FINISHED'}
 

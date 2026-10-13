@@ -31,6 +31,37 @@ def is_rendered(obj, collections):
     return any(c.name_full in collections for c in obj.users_collection)
 
 
+def mesh_counts(mesh):
+    """(triangles, face corners) of a mesh: an n-gon is n - 2 triangles and
+    n corners (sum of loop_total)."""
+    import numpy as np
+    count = len(mesh.polygons)
+    if not count:
+        return 0, 0
+    totals = np.empty(count, dtype=np.int32)
+    mesh.polygons.foreach_get('loop_total', totals)
+    corners = int(totals.sum())
+    return corners - 2 * count, corners
+
+
+def subdivided_counts(triangles, corners, levels):
+    """(triangles, corners) after `levels` Catmull-Clark levels. The first
+    level turns every n-gon into n quads (a triangle into 3 quads, 6
+    triangles; a quad into 4 quads, 8 triangles): as many quads as face
+    corners. Each further level multiplies the quads by 4."""
+    if levels <= 0:
+        return triangles, corners
+    quads = corners * 4 ** (levels - 1)
+    return 2 * quads, 4 * quads
+
+
+def subdivided_faces(mesh, levels):
+    """Faces after `levels` Catmull-Clark levels (quads only)."""
+    if levels <= 0:
+        return len(mesh.polygons)
+    return int(mesh_counts(mesh)[1] * 4 ** (levels - 1))
+
+
 class WeightCounter:
     """Triangle counts at render settings, cached per mesh / collection."""
 
@@ -41,18 +72,15 @@ class WeightCounter:
         self.collection_cache = {}
         self.evaluated = 0
 
-    def base_triangles(self, mesh):
+    def base_counts(self, mesh):
+        """(triangles, face corners) of the mesh as stored."""
         key = mesh.name_full
         if key not in self.mesh_cache:
-            import numpy as np
-            count = len(mesh.polygons)
-            if count:
-                totals = np.empty(count, dtype=np.int32)
-                mesh.polygons.foreach_get('loop_total', totals)
-                self.mesh_cache[key] = int(totals.sum()) - 2 * count
-            else:
-                self.mesh_cache[key] = 0
+            self.mesh_cache[key] = mesh_counts(mesh)
         return self.mesh_cache[key]
+
+    def base_triangles(self, mesh):
+        return self.base_counts(mesh)[0]
 
     def evaluated_triangles(self, obj):
         """Real evaluation, for what cannot be estimated (Geometry Nodes)."""
@@ -79,23 +107,28 @@ class WeightCounter:
         modifiers = [m for m in obj.modifiers if m.show_render]
         if any(m.type == 'NODES' for m in modifiers):
             return self.evaluated_triangles(obj), False
-        triangles = float(self.base_triangles(obj.data))
+        triangles, corners = (float(value) for value in self.base_counts(obj.data))
         for modifier in modifiers:
             if modifier.type in {'SUBSURF', 'MULTIRES'}:
-                triangles *= 4 ** modifier.render_levels
+                triangles, corners = subdivided_counts(triangles, corners, modifier.render_levels)
             elif modifier.type == 'ARRAY':
                 if modifier.fit_type != 'FIXED_COUNT':
                     return self.evaluated_triangles(obj), False
                 triangles *= modifier.count
+                corners *= modifier.count
             elif modifier.type == 'MIRROR':
-                triangles *= 2 ** sum(bool(axis) for axis in modifier.use_axis)
+                factor = 2 ** sum(bool(axis) for axis in modifier.use_axis)
+                triangles *= factor
+                corners *= factor
             elif modifier.type == 'SOLIDIFY':
                 triangles *= 2
+                corners *= 2
             elif modifier.type == 'DECIMATE' and modifier.decimate_type == 'COLLAPSE':
                 triangles *= modifier.ratio
+                corners = triangles * 3     # Collapse leaves triangles
             elif modifier.type in {'SCREW', 'SKIN', 'REMESH', 'BOOLEAN', 'WELD', 'WIREFRAME'}:
                 return self.evaluated_triangles(obj), False
-        return int(triangles), True
+        return int(round(triangles)), True
 
     def collection_triangles(self, collection, depth=0):
         key = collection.name_full
@@ -151,19 +184,88 @@ def heavy_subdivisions(objects, max_faces=50000, max_size=1.0):
         if not levels:
             continue
         base = len(obj.data.polygons)
-        evaluated = base * 4 ** levels
+        evaluated = subdivided_faces(obj.data, levels)
         size = max(obj.dimensions) if obj.dimensions else 0.0
         if evaluated > max_faces and size < max_size:
             found.append((obj.name, base, evaluated, size))
     return sorted(found, key=lambda row: row[2], reverse=True)
 
 
+def _png_header(head):
+    """(width, height, is_float) from the IHDR chunk of a PNG. Blender
+    loads 16-bit PNGs into a float buffer."""
+    import struct
+    if len(head) < 26 or head[:8] != b'\x89PNG\r\n\x1a\n' or head[12:16] != b'IHDR':
+        return None
+    width, height = struct.unpack('>II', head[16:24])
+    return width, height, head[24] > 8
+
+
+def _jpeg_header(head):
+    """(width, height, False) from the first SOF marker of a JPEG."""
+    import struct
+    if head[:2] != b'\xff\xd8':
+        return None
+    index = 2
+    while index + 9 < len(head):
+        if head[index] != 0xFF:
+            index += 1
+            continue
+        marker = head[index + 1]
+        if marker == 0xFF:
+            index += 1
+            continue
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            index += 2
+            continue
+        length = struct.unpack('>H', head[index + 2:index + 4])[0]
+        if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                      0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+            height, width = struct.unpack('>HH', head[index + 5:index + 9])
+            return width, height, False
+        index += 2 + length
+    return None
+
+
+def header_size(image, max_bytes=1 << 18):
+    """(width, height, is_float) read from the PNG or JPEG header of an
+    image that is not loaded, without decoding it. None when the format is
+    another one or the header cannot be read: the caller then loads it."""
+    import os
+    if image.source != 'FILE':
+        return None
+    try:
+        if image.packed_file is not None:
+            head = bytes(image.packed_file.data[:max_bytes])
+        else:
+            path = bpy.path.abspath(image.filepath_raw or image.filepath, library=image.library)
+            if not path or not os.path.isfile(path):
+                return None
+            with open(path, 'rb') as handle:
+                head = handle.read(max_bytes)
+    except Exception:
+        return None
+    found = _png_header(head) or _jpeg_header(head)
+    if found is None or not found[0] or not found[1]:
+        return None
+    return found
+
+
 def texture_weights(min_users=1):
     """(name, bytes, width, height, users) of every used image, heaviest first.
-    Reading the size loads the image: this is the slow part of the report."""
+    Images not loaded yet are measured from their PNG / JPEG header (memory
+    as Blender loads them: 4 channels, 1 byte or a float each); other
+    formats have to be loaded to read their size: the slow part of the
+    report."""
     rows = []
     for image in bpy.data.images:
         if image.type in {'RENDER_RESULT', 'COMPOSITING'} or image.users < min_users:
+            continue
+        found = None if image.has_data else header_size(image)
+        if found is not None:
+            width, height, is_float = found
+            memory = width * height * 4 * (4 if is_float else 1)
+            rows.append((image.name, memory, width, height, image.users))
             continue
         try:
             width, height = image.size
@@ -231,7 +333,10 @@ class OBJECT_OT_scene_weight_report(bpy.types.Operator):
     """List what weighs at RENDER time: rendered objects by triangle count
     (hidden in the viewport but rendered included, render-disabled skipped),
     modifiers, collection instances and particles counted, shared meshes
-    flagged, and textures by memory. Click a line to select its object"""
+    flagged, and textures by memory. PNG and JPEG sizes are read from the
+    file header; images in other formats (EXR, TIFF, TGA...) are loaded to
+    read their size, which can take a while. Click a line to select its
+    object"""
     bl_idname = "kelit_toolkit.scene_weight_report"
     bl_label = "Scene Weight Report"
     bl_options = {'REGISTER'}

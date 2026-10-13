@@ -218,49 +218,213 @@ def normalize_name_for_unreal(name, object_type='MESH', preserve_collision=True,
     return name
 
 
-def _socket_value(socket):
-    """Rounded, hashable default value of an unlinked node socket."""
-    value = getattr(socket, 'default_value', None)
+# ---------------------------------------------------------------------------
+# Material fingerprint (Merge Duplicate Materials, Auto Clean, instances)
+# ---------------------------------------------------------------------------
+# A fingerprint must change with EVERY setting that changes the render: a
+# Math node set to Multiply instead of Add, an RGB node colour, a ramp stop,
+# a node group's content, an image from another folder. Two materials that
+# fingerprint equal are merged and one of them is deleted, so when in doubt a
+# setting is part of the key. Only what is purely cosmetic in the node editor
+# (names, positions, sizes, colours, selection, collapsed state) is ignored.
+
+# node properties that never change the render (node editor layout)
+_COSMETIC_PROPERTIES = frozenset({
+    'rna_type', 'name', 'label', 'location', 'location_absolute', 'width',
+    'height', 'width_hidden', 'dimensions', 'select', 'hide', 'color',
+    'color_tag', 'use_custom_color', 'parent', 'internal_links', 'inputs',
+    'outputs', 'type', 'warning_propagation', 'is_hidden', 'description',
+})
+# for the structs a node holds (ramp stops, curve points, mappings), only the
+# selection is cosmetic: their 'location' or 'color' IS the setting
+_COSMETIC_NESTED = frozenset({'rna_type', 'select'})
+# node types without any effect on the shading
+_COSMETIC_NODES = frozenset({'NodeFrame'})
+# material-level settings that change how the material renders
+_MATERIAL_SETTINGS = (
+    'surface_render_method', 'use_backface_culling', 'use_backface_culling_shadow',
+    'use_backface_culling_lightprobe_volume', 'use_transparency_overlap',
+    'use_transparent_shadow', 'use_raytrace_refraction', 'refraction_depth',
+    'thickness_mode', 'use_thickness_from_shadow', 'displacement_method',
+    'volume_intersection_method', 'max_vertex_displacement', 'pass_index',
+    'alpha_threshold', 'blend_method',
+)
+_MAX_STRUCT_DEPTH = 8
+
+# packed image hashes, keyed by (session uid, packed size): the merge dialog
+# redraws often and hashing large packed images every time would stall it
+_PACKED_HASHES = {}
+
+
+def _is_cosmetic(identifier, nested=False):
+    if identifier.startswith('show_') or identifier.startswith('bl_'):
+        return True
+    return identifier in (_COSMETIC_NESTED if nested else _COSMETIC_PROPERTIES)
+
+
+def _plain_value(value, context=None):
+    """Rounded, hashable version of an RNA value."""
     if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, float):
-        return round(value, 4)
+        return round(value, 4) + 0.0   # + 0.0 turns -0.0 into 0.0
+    if isinstance(value, (set, frozenset)):
+        return tuple(sorted(value))
+    if isinstance(value, bpy.types.ID):
+        return _id_key(value, context if context is not None else _new_context())
     try:
-        return tuple(round(component, 4) for component in value)
+        return tuple(_plain_value(item, context) for item in value)
     except TypeError:
         return str(value)
 
 
-def _node_fingerprint(node):
-    image = getattr(node, 'image', None)
-    image_key = ''
-    if image is not None:
-        # file name only: two image datablocks loaded from the same file
-        # (rooftop_001.jpg and rooftop_001.jpg.001) are the same texture
-        image_key = image.filepath.replace(chr(92), '/').rsplit('/', 1)[-1] or image.name
-    values = tuple(sorted(
-        (socket.identifier, _socket_value(socket))
-        for socket in node.inputs if not socket.is_linked and hasattr(socket, 'default_value')))
-    return (node.type, image_key, values)
+def _new_context():
+    return {'trees': {}, 'stack': set(), 'structs': set()}
+
+
+def _session_key(datablock):
+    return getattr(datablock, 'session_uid', None) or datablock.as_pointer()
+
+
+def _image_key(image):
+    """What an image node actually reads. File images are keyed by their
+    absolute normalized path (the same file loaded twice, rooftop_01.jpg and
+    rooftop_01.jpg.001, is one texture; two files with the same name in two
+    folders are not), packed images by a hash of their bytes. Colour space
+    and alpha mode change the result, so they are part of the key. Generated
+    images and images with unsaved painting only equal themselves."""
+    import hashlib
+    import os
+    settings = (image.source, image.colorspace_settings.name, image.alpha_mode)
+    if image.source in {'GENERATED', 'VIEWER'} or image.type in {'RENDER_RESULT', 'COMPOSITING'}:
+        return ('image-id', image.name_full) + settings
+    try:
+        dirty = image.is_dirty
+    except Exception:
+        dirty = False
+    if dirty:
+        return ('image-id', image.name_full) + settings
+    packed = image.packed_file
+    if packed is not None:
+        cache_key = (_session_key(image), packed.size)
+        digest = _PACKED_HASHES.get(cache_key)
+        if digest is None:
+            digest = hashlib.md5(bytes(packed.data)).hexdigest()
+            _PACKED_HASHES[cache_key] = digest
+        return ('image-packed', digest) + settings
+    path = image.filepath_raw or image.filepath
+    if not path:
+        return ('image-id', image.name_full) + settings
+    absolute = bpy.path.abspath(path, library=image.library)
+    return ('image-file', os.path.normcase(os.path.normpath(absolute))) + settings
+
+
+def _id_key(datablock, context):
+    if isinstance(datablock, bpy.types.Image):
+        return _image_key(datablock)
+    if isinstance(datablock, bpy.types.NodeTree):
+        return _tree_fingerprint(datablock, context)
+    return (type(datablock).__name__, datablock.name_full,
+            datablock.library.filepath if datablock.library else '')
+
+
+def _struct_key(struct, context, depth=0):
+    """Every render-relevant property of an RNA struct (a node, a colour
+    ramp and its stops, a curve mapping and its points, a texture mapping),
+    recursively. ID pointers are keyed by what they are, not followed."""
+    if depth > _MAX_STRUCT_DEPTH:
+        return ('...',)
+    marker = (struct.bl_rna.identifier, struct.as_pointer())
+    if marker in context['structs']:
+        return ('cycle',)
+    context['structs'].add(marker)
+    try:
+        values = []
+        for prop in struct.bl_rna.properties:
+            identifier = prop.identifier
+            if _is_cosmetic(identifier, nested=depth > 0):
+                continue
+            try:
+                value = getattr(struct, identifier)
+            except Exception:
+                continue
+            if prop.type == 'POINTER':
+                if value is None:
+                    entry = None
+                elif isinstance(value, bpy.types.ID):
+                    entry = _id_key(value, context)
+                else:
+                    entry = _struct_key(value, context, depth + 1)
+            elif prop.type == 'COLLECTION':
+                entry = tuple(_struct_key(item, context, depth + 1) for item in value)
+            else:
+                entry = _plain_value(value, context)
+            values.append((identifier, entry))
+        return (struct.bl_rna.identifier, tuple(values))
+    finally:
+        context['structs'].discard(marker)
+
+
+def _socket_value(socket, context=None):
+    """Rounded, hashable default value of a node socket."""
+    return _plain_value(getattr(socket, 'default_value', None), context)
+
+
+def _node_fingerprint(node, context=None):
+    if context is None:
+        context = _new_context()
+    settings = _struct_key(node, context)
+    inputs = tuple(
+        (socket.identifier, _socket_value(socket, context))
+        for socket in node.inputs
+        if not socket.is_linked and hasattr(socket, 'default_value'))
+    # outputs carry values too: an RGB or Value node stores its colour or
+    # number in its OUTPUT socket, linked or not
+    outputs = tuple(
+        (socket.identifier, _socket_value(socket, context))
+        for socket in node.outputs if hasattr(socket, 'default_value'))
+    return (node.bl_idname, settings, inputs, outputs)
+
+
+def _tree_fingerprint(tree, context):
+    """Nodes and links of a node tree; node groups are followed recursively
+    (a group using itself, directly or not, stops at the cycle)."""
+    marker = tree.as_pointer()
+    if marker in context['trees']:
+        return context['trees'][marker]
+    if marker in context['stack']:
+        return ('tree-cycle', tree.name_full)
+    context['stack'].add(marker)
+    try:
+        prints = {node.name: _node_fingerprint(node, context)
+                  for node in tree.nodes if node.bl_idname not in _COSMETIC_NODES}
+        nodes = tuple(sorted(prints.values(), key=repr))
+        links = tuple(sorted(
+            ((prints.get(link.from_node.name), link.from_socket.identifier,
+              prints.get(link.to_node.name), link.to_socket.identifier,
+              bool(getattr(link, 'is_muted', False)))
+             for link in tree.links),
+            key=repr))
+    finally:
+        context['stack'].discard(marker)
+    result = ('tree', tree.bl_idname, nodes, links)
+    context['trees'][marker] = result
+    return result
 
 
 def material_fingerprint(material):
-    """Hashable description of what a material LOOKS like: node types, image
-    files, unlinked input values, links, surface settings. Two materials with
-    the same fingerprint render the same whatever their names (imports keep
-    creating rooftop_01, rooftop_01.001, ... copies of one material)."""
+    """Hashable description of what a material LOOKS like: every node with
+    all its settings (operations, blend modes, ramps, curves, node groups),
+    the images it reads (by file path or packed content), socket values,
+    links, surface settings. Two materials with the same fingerprint render
+    the same whatever their names (imports keep creating rooftop_01,
+    rooftop_01.001, ... copies of one material)."""
     if material is None:
         return None
-    surface = tuple(getattr(material, name, None)
-                    for name in ('surface_render_method', 'use_backface_culling'))
+    surface = tuple((name, _plain_value(getattr(material, name, None)))
+                    for name in _MATERIAL_SETTINGS)
     tree = getattr(material, 'node_tree', None)
     if tree is None or not tree.nodes:
         return ('flat', tuple(round(c, 4) for c in material.diffuse_color),
                 round(material.roughness, 4), round(material.metallic, 4), surface)
-    prints = {node.name: _node_fingerprint(node) for node in tree.nodes}
-    nodes = tuple(sorted(prints.values()))
-    links = tuple(sorted(
-        (prints[link.from_node.name], link.from_socket.identifier,
-         prints[link.to_node.name], link.to_socket.identifier)
-        for link in tree.links))
-    return ('nodes', nodes, links, surface)
+    return ('nodes', _tree_fingerprint(tree, _new_context()), surface)
