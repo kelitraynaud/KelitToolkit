@@ -175,7 +175,7 @@ class OBJECT_OT_delete_unused_materials(bpy.types.Operator):
 
 
 class OBJECT_OT_purge_unused_materials(bpy.types.Operator):
-    """Delete all unused materials from the Blender project"""
+    """Delete every material with no user from the .blend file"""
     bl_idname = "kelit_toolkit.purge_unused_materials"
     bl_label = "Purge Unused Materials"
     bl_options = {'REGISTER', 'UNDO'}
@@ -204,10 +204,7 @@ class OBJECT_OT_purge_unused_materials(bpy.types.Operator):
 
 
 class OBJECT_OT_merge_duplicate_materials(bpy.types.Operator):
-    """Merge materials that look the same (same textures, values and links)
-    into one, whatever their names: rooftop_01, rooftop_01.001, ... become
-    rooftop_01. Every object of the file that used a copy is reassigned to
-    the kept material and the copies are removed"""
+    """Merge materials with identical nodes and images into one, whatever their names. Applies to the whole file; the copies are deleted"""
     bl_idname = "kelit_toolkit.merge_duplicate_materials"
     bl_label = "Merge Duplicate Materials"
     bl_options = {'REGISTER', 'UNDO'}
@@ -372,11 +369,7 @@ def _format_bytes(value):
 
 
 class OBJECT_OT_merge_duplicate_images(bpy.types.Operator):
-    """Merge images with identical content into one, whatever their names
-    (the .001, .002 copies imports and character generators leave behind).
-    Every material using a copy is pointed at the kept image and the copies
-    are removed. Same file read with another colour space or alpha mode is
-    kept apart"""
+    """Merge images with identical content into one, whatever their names. Applies to the whole file; the copies are deleted, unsaved painting is skipped"""
     bl_idname = "kelit_toolkit.merge_duplicate_images"
     bl_label = "Merge Duplicate Images"
     bl_options = {'REGISTER', 'UNDO'}

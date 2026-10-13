@@ -1036,11 +1036,7 @@ def build_material_instances(context, objects, two_sided='OFF', alpha_mode='AUTO
 # ============================================================================
 
 class UNREAL_OT_build_material_instances(bpy.types.Operator):
-    """Create one Unreal material instance per Blender material, children of
-    the master material below, import their textures and assign them to the
-    actors sent from this .blend. 'Send to Unreal' does this by itself when
-    its Materials option is set to the master material; run it by hand to
-    refresh the materials without sending the meshes again"""
+    """Rebuild the materials as instances of the Kelit master material in Unreal and assign them, without sending the geometry again"""
     bl_idname = "kelit_toolkit.build_material_instances"
     bl_label = "Build Material Instances"
     bl_options = {'REGISTER'}

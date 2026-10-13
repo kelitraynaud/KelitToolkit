@@ -282,9 +282,7 @@ class OBJECT_OT_generate_lods(bpy.types.Operator):
 
 
 class OBJECT_OT_convert_to_low_poly(bpy.types.Operator):
-    """Create a low-poly copy of each selected object and bake the high-poly
-    surface detail onto it (tangent normal + AO, optionally base color).
-    The original is kept, hidden. Bakes run in Cycles and can take a while"""
+    """Create a decimated, unwrapped low-poly copy of the selected meshes with Normal, AO and Base Color baked from the original, which is kept hidden"""
     bl_idname = "kelit_toolkit.convert_to_low_poly"
     bl_label = "High to Low Poly (Bake Details)"
     bl_options = {'REGISTER', 'UNDO'}

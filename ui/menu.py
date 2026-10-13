@@ -55,7 +55,7 @@ from ..operators.unified_export import (
 
 
 class VIEW3D_MT_unreal_toolkit_menu(bpy.types.Menu):
-    bl_label = "Unreal Toolkit"
+    bl_label = "Kelit Toolkit"
     bl_idname = "VIEW3D_MT_unreal_toolkit_menu"
 
     def draw(self, context):

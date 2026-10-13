@@ -1102,11 +1102,7 @@ def fix_bone_lengths(context, armature, ratio=2.0, stray_joints=True,
 
 
 class OBJECT_OT_fix_bone_lengths(bpy.types.Operator):
-    """Shorten bones that are far too long for their place in the rig
-    (fingertips several metres long after a glTF or FBX import). Only the
-    length changes: orientation, skinning and animations stay exactly the
-    same, Unreal reads joints only. IK, socket, root and targeted bones are
-    never moved"""
+    """Shorten bones far too long for their place in the selected rigs. Orientation, skinning and animation stay the same; IK and socket bones are left alone"""
     bl_idname = "kelit_toolkit.fix_bone_lengths"
     bl_label = "Fix Bone Lengths"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1170,11 +1166,7 @@ class OBJECT_OT_fix_bone_lengths(bpy.types.Operator):
 
 
 class OBJECT_OT_rescale_rig_animation(bpy.types.Operator):
-    """Rescale a rigged character and its animations by one factor, with the
-    scale applied: bones, skinned meshes and every bone position key are
-    multiplied, so the rig ends at scale 1.0 at the new size. Typical use: an
-    FBX in centimetres read as metres (factor 0.01). Rotations and bone scale
-    keys are unit-free and stay as they are"""
+    """Rescale a rigged character, its skinned meshes and its bone position keys by one factor, with the scale applied. Can delete the import's parent empties"""
     bl_idname = "kelit_toolkit.rescale_rig_animation"
     bl_label = "Rescale Rig + Animation"
     bl_options = {'REGISTER', 'UNDO'}

@@ -141,11 +141,7 @@ def compute_preview(context, pool, origin_preset, organization='PARENTS'):
 
 
 class OBJECT_OT_auto_clean(bpy.types.Operator):
-    """Run the main cleanup tools in the right order: merge duplicate
-    materials, delete unused empties, turn duplicate meshes into instances,
-    apply rotation and scale, set the origins, normalize the names, then
-    validate. Shows what each step will touch before running. One Ctrl+Z
-    undoes everything"""
+    """Run the main cleanup tools in order, with a preview of what each step changes. One Ctrl+Z undoes everything"""
     bl_idname = "kelit_toolkit.auto_clean"
     bl_label = "Auto Clean"
     bl_options = {'REGISTER', 'UNDO'}

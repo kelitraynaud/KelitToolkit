@@ -1,8 +1,8 @@
 # Kelit Toolkit
 
-Blender add-on to prepare and send scenes to Unreal Engine: USD scene sync
-with native LevelSequence animation, naming conventions, collisions, LODs,
-high-to-low-poly baking, materials, and batch file export.
+Blender add-on to prepare scenes and send them to Unreal Engine: one-click
+USD send with materials, animation and cameras, plus the cleanup, naming,
+instancing, collision and optimization tools that make a scene ready for it.
 
 Developed by [Kélit Raynaud](https://github.com/kelitraynaud). Vibecoded.
 Bug reports, feature requests and pull requests are welcome, see
@@ -13,358 +13,322 @@ Bug reports, feature requests and pull requests are welcome, see
 
 ## Requirements
 
-- Blender 5.0+ (uses the bundled `pxr` USD bindings)
-- Unreal Engine 5.5+ (developed and tested against 5.8) with:
-  - **Python Editor Script Plugin** (remote execution enabled)
-  - **USD Importer** plugin (for USD Scene Sync)
-
-The add-on can configure the Unreal side for you: if a send fails, the
-**Connection Doctor** dialog opens, reads your project files, shows what is
-missing and fixes it (plugins enabled, remote execution turned on, with
-backups). You can also run it any time from the panel's Advanced section.
+- Blender 5.0 or later (tested on 5.2).
+- Unreal Engine 5.5 or later (tested on 5.8), running on the same computer,
+  with the **Python Editor Script Plugin** (remote execution on) and the
+  **USD Importer** plugin. The **Connection Doctor** can enable both for you.
 
 ## Install
 
-1. Download the zip from the latest
-   [release](https://github.com/kelitraynaud/KelitToolkit/releases).
-2. In Blender: *Edit > Preferences > Add-ons > Install…* and pick the zip.
-3. Enable **Kelit Toolkit**. The panel lives in the 3D View sidebar (N key).
-4. Open your Unreal project, select your objects in Blender, and click
-   **Send Scene via USD**. If anything is not set up yet, the Connection
-   Doctor tells you what and offers to fix it.
+**Drag and drop.** Drag this link from your browser into the Blender window:
 
-## How it works
+[Drag into Blender to install Kelit Toolkit](https://kelitraynaud.github.io/KelitToolkit/kelittoolkit.zip?repository=https%3A%2F%2Fkelitraynaud.github.io%2FKelitToolkit%2Findex.json&blender_version_min=5.0.0)
 
-One click on **Send Scene via USD** creates three things in Unreal:
+The first time, Blender asks to add the Kelit Toolkit repository: click
+**Add Repository**, then drag the link once more to install. Updates then
+come through Blender itself.
 
-1. **Assets**: your meshes, imported into the Content Browser under
-   `Content Folder/<blend name>/`. Reusable bricks.
-2. **Actors**: instances of those assets placed in the currently open level,
-   one per Blender object, at the exact world transform, with the parenting
-   rebuilt. Each actor carries an invisible tag ("this .blend, this object").
-3. **A LevelSequence** (with *Include Animation*): the native sequence that
-   animates those actors and carries the camera, created at
-   `Content Folder/<blend name>/LS_<blend name>`.
+**From a file.** Download `kelittoolkit-<version>.zip` from the
+[releases](https://github.com/kelitraynaud/KelitToolkit/releases), then in
+Blender: *Edit > Preferences > Get Extensions*, drop-down menu (top right) >
+*Install from Disk*. Dragging the zip into the Blender window also works.
 
-**Re-syncing** uses the tags: the objects you send again replace their own
-old actors, everything else in the level is untouched. The **sequence is
-rebuilt from scratch** on every sync, so keep manual sequencer work in a
-separate sequence.
+The panel is in the 3D View sidebar (**N** key) > **Kelit Toolkit**. The
+tools are also in the *Object* menu.
 
-The **Content Folder** is just the storage address. Keep one fixed folder
-per Unreal project: changing it between two syncs of the same .blend leaves
-the plugin looking in the new place while the old assets stay in the old one.
+Use either the extension or the legacy zip (`KelitToolkit_<version>.zip`,
+*Add-ons > Install from Disk*), not both: they register the same tools.
 
-## Optimize AI Meshes
+## Updates
 
-In **Prepare Assets > Mesh**, **Optimize AI Meshes** adds a reversible
-`KT_Optimize` Decimate modifier. This is a lossy reduction: retaining a UV layer
-does not guarantee identical textures, shading or silhouette. Compare at the
-final camera distance before using **Apply**.
+If you installed with the drag-and-drop link, updates appear in *Get
+Extensions*. Otherwise press **Enable Native Updates** (panel > Send to
+Unreal > Advanced, or the add-on preferences): it adds the repository
+`https://kelitraynaud.github.io/KelitToolkit/index.json`, saves your
+preferences and checks for updates. Then remove the copy you installed from
+a file, so only one version runs.
 
-- **Selected Only** affects only the selected eligible objects. **Entire Scene**
-  affects eligible objects in that scene. **Include Linked Instances Outside
-  Scope** explicitly expands this to other objects sharing the mesh data.
-  Excluded references, linked assets, rigged meshes, and incompatible modifier
-  stacks are skipped. A second Decimate is never stacked automatically.
-- **Minimum Retained Ratio** defaults to 50%. This limit overrides the face
-  budget; it is a conservative starting point, not a quality guarantee. Lower
-  it explicitly for more reduction. Surface budgets use scene units and the
-  largest targeted instance, including nonuniform scaling.
-- **Mark as Hero** sets a per-object minimum. It affects the selection unless
-  **Include Linked Instances** is enabled. Run Optimize again to update the
-  modifiers. At 100%, an existing optimization modifier is removed. This
-  restores the base mesh, not detail already removed with destructive Apply.
-- **Keep Original Reference** creates an independent excluded copy in
-  `KT_Optimize_References`, hidden in the viewport and render. It is retained
-  across repeated optimizations. For comparison, hide the optimized object and
-  enable the matching reference's viewport/render visibility. Its name is stored
-  in the optimized object's `kt_optimize_reference` custom property.
-- **Protect UV Island Borders** pins boundary vertices. It can still produce
-  shading or texture artifacts, especially at low budgets. When only some linked
-  users are targeted, their mesh data is copied so vertex weights cannot change
-  objects outside the scope.
-- The dialog shows an **estimate**. The execution report counts evaluated faces
-  and checks whether UV layers are present. **Remove KT_Optimize** removes only
-  the modifiers; after destructive Apply, use Undo or the saved reference.
+## Your first send
 
-## USD Scene Sync
+1. Open your Unreal project.
+2. In Blender, select the objects to send (or nothing, and use a collection).
+3. Click **Send to Unreal**.
+4. Check the options in the dialog (below) and click OK.
+5. The result is reported in Blender's status bar. If Unreal does not
+   answer, the Connection Doctor opens and tells you what to fix.
 
-Objects disabled for **render** (camera toggle) are skipped. Objects merely
-disabled in the viewport (monitor toggle) ARE exported: the sync temporarily
-re-enables them so a lightened viewport never loses geometry in Unreal.
+What it creates in Unreal:
 
-### "Include Animation"
+- **Assets** in the Content Browser, under `Content Folder/<blend name>/`.
+- **Actors** in the open level, one per Blender object, at the same world
+  position, with the parenting rebuilt.
+- With **Scene Animation (Sequencer)**: a **LevelSequence**
+  `LS_<blend name>` that animates the actors and carries the camera.
+- **Materials**: one material instance per Blender material, on the Kelit
+  master material.
 
-Turns the scene into a native Unreal LevelSequence, built by script rather
-than by UE's USD actor import (which nests everything under one actor):
+Sending again replaces the actors sent from this .blend and leaves the rest
+of the level alone. The sequence is rebuilt on every send: keep manual
+sequencer work in a separate sequence. Keep one fixed **Content Folder** per
+Unreal project.
 
-- every object's transform is sampled per frame in Blender and written as a
-  real transform track, one binding per moving actor, plain StaticMeshActors
-  set to Movable, no nested scene components;
-- **Preserve Hierarchy** (default): animated nulls, their children and the
-  camera keep their Blender parenting. Keys are baked in parent space, so
-  attached actors reproduce the same world motion;
-- **editable keyframes by default**: the sequence keeps the keyframes
-  authored in Blender and only inserts extra keys where Unreal's AUTO
-  tangents would drift beyond 0.1% of the motion's amplitude; densely-baked
-  imports (a key per frame) collapse to minimal keys. `Every Frame (exact)`
-  gives a dense bake instead;
-- the scene camera becomes a **CineCameraActor** with focal length, filmback
-  and depth of field from Blender, wired to a **Camera Cuts track**; by
-  default the camera (and the null chain that only drives it) is carried
-  inside the sequence as spawnables;
-- mirrored (negative-scale) objects keep their mirroring;
-- cache-driven duplicates (a keyframed hierarchy shipped together with an
-  Alembic-cache copy of itself) are skipped automatically;
-- the dialog options are remembered per scene.
+## Send options
 
-Camera orientation is derived from forward/up vectors through
-`MathLibrary.make_rot_from_xz`, which is unambiguous between Blender's
-convention (-Z forward, +Y up) and Unreal's (+X forward, +Z up).
+| Option | What it does |
+|---|---|
+| Source | Selection (with parents and children), or a collection: 'Export' if the file has one, otherwise the active collection. |
+| Place Actors in Level | Spawns the actors. Untick to import assets only. |
+| Replace Sent Objects | Deletes and recreates the actors sent earlier from this .blend. |
+| Import Materials | Sends materials. Untick for geometry only. |
+| Materials | **Kelit master material** (default) or Unreal's own USD materials. |
+| Two-Sided | Single-sided (default), as in Blender, or two-sided everywhere. |
+| Alpha | Cutout (default, translucent only for materials set to Blended in Blender), ignore alpha, or translucent. |
+| Export Detected Rigs as Skeletal Meshes | Armatures and their meshes become skeletal meshes. |
+| Skeletal Animation Clips | Which actions are exported as animation sequences. |
+| Scene Animation (Sequencer) | Builds the LevelSequence from the object and camera animation. |
+| Include Camera | Sends the scene camera as a CineCamera with a Camera Cuts track. |
+| Camera as Spawnable | Keeps the camera inside the sequence instead of the level. |
+| Preserve Hierarchy (Animated) | Keeps animated parenting; keys are written in parent space. |
+| Keyframes | Authored keys (default, only what Unreal needs) or every frame. |
+| Force Geometry Reimport | Reimports geometry even when it has not changed. |
 
-### Make Sequence Self-Contained
+Objects disabled for render (camera icon) are not sent. Objects only hidden
+in the viewport are sent.
 
-Converts every binding to spawnables so the whole sequence carries its own
-actors: no level dependency, no broken bindings. The level's attach
-hierarchy is replayed as native **Attach Tracks**, and static objects join
-the sequence with their level transform.
+## Tools
 
-## Other tools
+Tools that change or delete data say so in their tooltip. All of them can be
+undone with Ctrl+Z.
 
-- **Quick tool search** at the top of the panel: type to filter every tool.
-- **File export**: unified export with automatic skeletal/static/scene
-  routing (USD primary, FBX fallback), plus a batch FBX export with embedded
-  UCX/UBX/USP collisions and LODs.
-- **High to Low Poly (Bake)**: low-poly copy decimated to a triangle budget,
-  Smart UV unwrap, Normal/AO/BaseColor baked from the high-poly (the pair is
-  isolated during the bake), textures packed, original kept hidden.
-- **Scene cleanup**: *Delete Unused Empties* (protects camera rigs,
-  constraint/DOF/driver targets), *Bake Camera Animation* (bakes the final
-  world motion and focus onto the camera so its rig becomes deletable),
-  *Remove Empty Parents*, hidden-object and orphan-data cleanup.
-- **Normalize Scene Scale**: rescales objects AND cameras around the world
-  origin so mis-scaled imports reach scale 1.0 at real size with the framing
-  preserved (keyframes, camera clip/focus and light power follow).
-- **Naming**: UE conventions (SM_/M_/T_ prefixes, PascalCase), find and
-  replace, batch normalization.
-- **Collisions and LODs**: convex UCX / box / sphere collisions, LOD chains.
-- **Materials**: Simple-PBR conversion, procedural baking, auto PBR setup
-  from texture folders, and **Build Material Instances**: rebuilds the
-  Blender materials in UE as instances of a single master material, with
-  textures exported and imported by the add-on itself.
-- **Instances**: duplicate detection and conversion to instances,
-  instance-safe apply of scale and rotation.
+### Send to Unreal
+
+- **Send to Unreal**: the send described above.
+- **Update Materials Only**: rebuilds the material instances without
+  sending the geometry again.
+- **Choose Project**: picks which running Unreal project receives the
+  commands, when several are open.
+- **Export Files Instead (USD / FBX)**: writes files to disk instead of
+  sending to a running Unreal.
+- Advanced:
+  - **Test Unreal Connection** and **Connection Doctor (Setup Help)**:
+    check, and fix, the Unreal project setup (plugins, remote execution),
+    with backups of the files it changes.
+  - **Enable Native Updates**: see Updates.
+  - **Clear All Synced Actors**: removes the actors sent from this .blend.
+  - **Make Sequence Self-Contained**: turns the sequence's actors into
+    spawnables, so the sequence plays in any level.
+  - **Export USD Hierarchy Only** and **Batch FBX Export**: file exports.
+  - **Fix Permanently (DefaultEngine.ini)**: makes Unreal 5.5+ use its
+    legacy FBX importer for files you import by hand.
+
+### Prepare Assets
+
+Transforms
+
+- **Apply Scale** and **Apply Rotation**: apply the transform to every
+  object sharing the mesh. Mirrored and zero scales are refused.
+- **Normalize Scene Scale**: rescales the whole scene (objects, cameras,
+  lights, location keys) by one factor, framing kept.
+- **Rescale Rig + Animation**: rescales a rigged character and its
+  animations by one factor (0.01 for a file in centimetres read as metres),
+  scale applied, import empties removed.
+- **Fix Bone Lengths**: shortens bones far too long for their place in the
+  rig, without changing their orientation or the animation.
+- **Bake Camera Animation**: bakes the camera's final motion and focus onto
+  the camera itself, so its rig can be deleted.
+
+Instances
+
+- **Detect Duplicates > Instances**: objects with the same shape, UVs and
+  materials share one mesh, even when their position was baked into the
+  mesh.
+- **Rejoin Material Splits**: objects an export cut per material
+  (`Box074Material260`, `Box074Material310`) become one object again.
+- **Split Repeated Parts**: elements repeated inside one mesh come out as
+  instances; pieces that touch stay together.
+- **Replace with Active**, **Group Similar in Collection**, **Realize
+  Modifiers to Instances**.
+
+Origin
+
+- **Bottom Center**, **Center**, **Top Center**, **Custom Position**: move
+  the origin of the selected meshes; every object sharing the mesh keeps its
+  place. **Bottom Center (Fix Array)** compensates Array offsets.
+
+Mesh
+
+- **Apply All Modifiers** and **Enhance Low Poly** (adds Bevel, Subdivision
+  and Weighted Normal, nothing applied).
+- **High to Low Poly (Bake)**: low-poly copy to a triangle budget, UV
+  unwrap, Normal, AO and Base Color baked from the high poly.
+- **Optimize AI Meshes**: decimates AI-generated props (Meshy, Tripo,
+  Hunyuan...) to a face budget per square metre, once per shared mesh. It
+  adds a reversible `KT_Optimize` modifier by default; **Apply** bakes it.
+  The star button (**Mark as Hero**) sets a minimum ratio for objects seen
+  up close; the X button removes the modifiers. Compare at the final camera
+  distance before applying: decimation keeps the UVs but can change shading.
+- **Create Collision Mesh** (UCX convex hull, box, sphere) and **Generate
+  LODs**.
+
+### Clean & Check
+
+- **Auto Clean**: the main cleanup tools in the right order (merge duplicate
+  materials, unused empties, material splits, repeated parts, duplicates to
+  instances, rotation and scale, origins, names, validation). The dialog
+  shows what each step will touch; one Ctrl+Z undoes all of it.
+- Naming: **Normalize Names (Quick)** (Unreal prefixes and PascalCase),
+  **Normalize (Advanced)**, **Find & Replace**, **Clean Suffixes**, **Mesh
+  Name from Object**, **Object Name from Mesh**, **Material Name from
+  Mesh**, **Add Prefix**.
+- Materials: **Auto Setup PBR Textures**, **Create Material by Mesh**,
+  **Convert to Simple PBR**, **Detect Unsupported Nodes**, **Bake
+  Procedural to Texture**, **Validate Texture Paths**, **Rename Textures for
+  Unreal**, **Extract Textures**, **Delete Unused Materials** (empty slots of
+  the selection), **Purge Unused Materials** (whole file), **Merge Duplicate
+  Materials** and **Merge Duplicate Images** (by content, whatever the
+  names).
+- Scene Cleanup: **Scene Weight Report** (what weighs at render time:
+  triangles, shared meshes, textures, heavy subdivisions), **Delete Hidden
+  Objects**, **Delete Unused Empties** (camera rigs and constraint targets
+  kept), **Remove Empty Parents**, **Remove Empty Collections**, **Purge
+  Zero-Face Meshes**, **Clean Vertex Groups**, **Remove Unused Mesh Data**.
+- **Validate for Unreal**: lists what still needs attention.
+
+### Search and reports
+
+The search field at the top of the panel filters every tool by name or
+description. It shows each tool's full name, which can differ slightly from
+the button text.
+
+Validate, Auto Clean, Scene Weight Report and Optimize AI Meshes open a
+report window: click a line to select its object, **Copy to Clipboard** to
+share it.
 
 ## FAQ
 
 **"No running Unreal Editor found"**
-Three causes, in order of likelihood: Unreal is not running with your
-project open; the Python Editor Script Plugin is not enabled; remote
-execution is not ticked in Project Settings > Plugins > Python. The
-Connection Doctor (opens automatically on failure) can fix the last two:
-point it at your project folder, click OK, restart Unreal. Also check you
-do not have two editors open, the wrong one may answer.
+Unreal is not running with your project open, the Python Editor Script
+Plugin is off, or remote execution is not ticked (Project Settings > Plugins
+> Python). The Connection Doctor fixes the last two: point it at your
+project folder, click OK, restart Unreal. With several editors open, use
+**Choose Project**.
 
-**Actors spawn but they are empty (no mesh)**
-The USD Importer plugin is disabled in your project. The Connection Doctor
-enables it; restart Unreal afterwards.
+**Actors arrive without a mesh**
+The USD Importer plugin is off in your project (the Connection Doctor
+enables it, restart Unreal), or the send was interrupted: send again.
 
-**Second sync says "sequence not found", or assets appear in two places**
-The Content Folder changed between two syncs of the same .blend. The plugin
-stores everything under `Content Folder/<blend name>/`; keep one fixed
-folder per project.
+**Assets appear in two places**
+The Content Folder changed between two sends of the same .blend. Keep one
+fixed folder per project.
 
 **Some objects did not arrive**
-Objects disabled for render (camera toggle) are skipped on purpose.
-Viewport-hidden objects (monitor toggle) ARE exported. Cache-driven
-duplicates (a keyframed hierarchy plus an Alembic-cache copy of itself,
-common in C4D exports) are skipped automatically: the keyframed copy is the
-one that arrives.
+Objects disabled for render are skipped on purpose. Cache-driven copies (a
+keyframed hierarchy plus an Alembic copy of itself, common in C4D exports)
+are skipped too: the keyframed copy arrives. Note that **Delete Hidden
+Objects** deletes viewport-hidden objects that a send would include.
 
-**My re-synced sequence lost the tracks I added by hand**
-Re-syncing rebuilds the LevelSequence from scratch. Keep manual work
-(lights, audio, extra cameras) in a separate sequence.
+**My sequence lost the tracks I added by hand**
+Every send rebuilds the LevelSequence. Keep manual work in a separate
+sequence.
 
 **Everything is tiny (or huge) in Unreal**
-Your import is at 0.01 scale (common with C4D/FBX round-trips). Run
-**Normalize Scene Scale** first: objects and cameras reach scale 1.0 at
-real size with the framing preserved.
+The file is at 0.01 scale (common with C4D or FBX round-trips). Run
+**Normalize Scene Scale**, or **Rescale Rig + Animation** for a rigged
+character.
 
-**The model looks see-through or inside-out in Unreal, fine in Blender**
-Two Blender defaults reach Unreal the wrong way: backface culling off makes
-every mesh double-sided, and anything plugged into Alpha makes Unreal build a
-translucent material that does not write depth. The sync options fix both:
-**Two-Sided** (single-sided by default) and **Alpha** (cutout by default,
-translucent only for materials set to Blended in Blender).
+**The model looks see-through or inside-out in Unreal**
+Blender exports backface culling off as two-sided, and anything plugged into
+Alpha as translucent. The **Two-Sided** and **Alpha** options fix both
+(single-sided and cutout by default).
 
 **The camera arrives blurred**
-Unreal's CineCamera defaults to a 1 km manual focus. The sync mirrors
-Blender's depth of field instead: check your camera's *Depth of Field*
-checkbox in Blender. Animated focus is applied as its first-frame value for
-now: authoring sequence focus tracks from python crashes UE 5.8's Sequencer
-on open, so the animated version is on hold until a safe route exists.
+Tick *Depth of Field* on the Blender camera: the send mirrors it. Animated
+focus is sent as its first-frame value for now (python-authored focus
+tracks crash Unreal 5.8's Sequencer).
 
-**An FBX I imported by hand looks wrong in UE 5.5+**
-Unreal's Interchange importer handles some FBX differently. **Fix
-Interchange FBX (Permanent)** (Advanced section) writes the legacy-importer
-flag into your project config; restart Unreal.
+**An FBX I imported by hand looks wrong in Unreal 5.5+**
+Use **Fix Permanently (DefaultEngine.ini)** (Advanced) and restart Unreal.
 
-**How do I remove everything the plugin created?**
-**Clear All Synced Actors** removes this .blend's actors from the level;
-the imported assets live under `Content Folder/<blend name>/` and can be
-deleted there.
+**How do I remove what the add-on created?**
+**Clear All Synced Actors** removes this .blend's actors; the assets are in
+`Content Folder/<blend name>/`.
 
-**How do I update the add-on?**
-Grab the latest zip from the
-[releases](https://github.com/kelitraynaud/KelitToolkit/releases) page, or
-add the extension repository once and update natively from Blender (see
-Updates below).
+## Technical notes (Unreal 5.8)
 
-## Updates
-
-Blender can update the add-on natively. One click: in the add-on
-preferences (or the panel's Advanced section), press **Enable Native
-Updates**. It registers the toolkit's update repository and Blender then
-shows new versions in *Preferences > Get Extensions*.
-
-Manual equivalent: add
-`https://kelitraynaud.github.io/KelitToolkit/index.json` as a remote
-repository in *Get Extensions > Repositories*. If you install the toolkit
-from the repository, remove the zip-installed copy so only one version runs.
-
-## Technical notes (UE 5.8)
-
-- Mesh prims (and their `displayName` metadata) are renamed after the
-  Blender object; a `_Mesh` suffix protects names ending in digits from UE's
+- Mesh prims (and their `displayName`) are renamed after the Blender
+  object; a `_Mesh` suffix protects names ending in digits from Unreal's
   trailing-number stripping.
 - Import uses `kinds_to_collapse=0` and `use_prim_kinds_for_collapsing=False`
   so nested meshes are never merged.
-- Asset matching: mesh-data hint first, then prim-name hint, then name
-  variants, then a geometry fingerprint for UE-deduplicated identical
-  meshes.
+- Asset matching: mesh-data hint, then prim-name hint, then name variants,
+  then the asset registry for freshly imported meshes.
 - Unreal's AUTO key tangents were measured against the editor (flat at end
   keys and at interior extrema, otherwise central difference clamped to 1.5x
   the smaller adjacent secant), so the key reduction predicts what Unreal
   will interpolate.
 - Level actors are never renamed through the API (a name clash is a fatal
   engine error); only sequence-namespace binding names are set.
-- Large remote-execution responses are reassembled across TCP segments (the
-  vendored client originally read a single segment).
-- The remote-execution endpoints can be changed in the add-on preferences if
-  the UE project uses non-default Python settings.
+- Large remote-execution responses are reassembled across TCP segments.
+- The remote-execution endpoints can be changed in the add-on preferences.
 
-## Versioning
+## Changelog
 
-**0.9.3**:
+**0.9.4**: review release, nothing new, everything safer.
 
-New tools
+- Merge Duplicate Materials compares every node setting (operation, colour,
+  ramp, blend mode, UV map, node groups) and the full image path: materials
+  that only looked alike are no longer merged. Merge Duplicate Images skips
+  unsaved painting and generated images.
+- Images with the same name in different forms (Wood, Wood.001, wood.png)
+  get distinct Unreal textures instead of sharing one.
+- Fix Bone Lengths leaves IK, socket, target and constrained bones alone and
+  is off by default in Rescale Rig + Animation. Rescale Rig checks
+  everything before changing anything and rescales meshes skinned through a
+  modifier only.
+- Split Repeated Parts keeps elements with different UVs apart and is much
+  faster; Rejoin Material Splits skips groups with different modifiers.
+- Re-sends reset every material instance parameter (no leftover tint or
+  emission); alpha packed into Roughness or Metallic is extracted; textures
+  are written as real PNG; objects sharing a mesh with different materials
+  get per-actor materials in Unreal.
+- The static import cache is cleared before each re-import. With several
+  Unreal editors open, the send asks you to choose a project instead of
+  guessing; the Connection Doctor opens again when no editor answers.
+- Viewports always come back from Solid after a material or image deletion,
+  even on error. Optimize AI Meshes and Scene Weight Report edge cases fixed.
+- Drag-and-drop install link, rewritten README, shorter tooltips, Object
+  menu renamed Kelit Toolkit.
 
-- **Auto Clean**: the main cleanup tools chained in the right order (merge
-  duplicate materials, unused empties, material splits, repeated parts,
-  duplicates to instances, rotation and scale, origins, names, validation),
-  with a preview of what each step touches, remembered options and one undo
-  step. The parent hierarchy is kept by default (or turned into collections).
-- **Optimize AI Meshes**: batch Collapse decimation of AI-generated props
-  (Meshy, Tripo, Hunyuan...) to a face budget per square metre, one pass per
-  shared mesh, non-destructive by default (KT_Optimize modifier and a Remove
-  button), optional Apply and UV border protection. **Mark as Hero** sets a
-  minimum ratio for objects seen up close.
-- **Scene Weight Report**: triangles and texture memory at render time
-  (hidden but rendered objects counted, render-disabled collections skipped,
-  shared meshes counted once), with alerts on heavy subdivisions of small
-  objects.
-- **Merge Duplicate Materials** and **Merge Duplicate Images**: merge by
-  content, whatever the names (colour space and alpha mode kept apart for
-  images).
-- **Rejoin Material Splits** and **Split Repeated Parts**: objects cut per
-  material by an export are joined back; elements repeated inside one mesh
-  come out as instances.
-- **Rescale Rig + Animation**: rescales a rig, its skinned meshes and every
-  bone position key by one factor, scale applied, import empties removed.
-- **Fix Bone Lengths**: shortens out-of-proportion bones and brings stray
-  end joints back, orientation and animation unchanged.
-- **Report window** for Validate, Auto Clean and the reports above: full
-  list, click a line to select its object, copy to clipboard.
-- **Choose Project**: picks which running Unreal project receives the
-  commands.
-
-Send to Unreal
-
-- Materials are built on the Kelit master material by default: one instance
-  per Blender material, opacity as cutout, per-instance blend mode and
-  two-sided overrides, texture settings (normal maps flipped for Unreal).
-- **Two-Sided** and **Alpha** options: single-sided and cutout by default,
-  translucent only for materials set to Blended in Blender.
-- Collection mode uses the active collection when there is no 'Export'
-  collection, and says which one it sends.
-- Static geometry import cache, material graph and UV transforms, active UV
-  ordering, RGBA masks, skeletal animation and rig options.
-- Fixed actors placed with an empty mesh: freshly imported meshes are found
-  through the asset registry.
-- Detect Duplicates handles positions baked into the meshes and compares
-  materials by content.
-
-Fixes
-
-- Skeletal export no longer moves a mesh parented to another mesh twice.
-- Origin presets keep parented objects in place; UCX hulls the evaluated
-  shape; snake case keeps LOD tags; Apply Scale refuses zero scale.
-- Connection Doctor reports write errors (read-only project files) instead
-  of failing, and opens only when no editor answered.
-- Focus distance measured along the view axis, like Blender.
-- Material and image deletions switch Material Preview / Rendered viewports
-  to Solid meanwhile (EEVEE could crash).
-- Every operator id moved to kelit_toolkit.* (another add-on registered the
-  same id) and the scene settings to kelit_toolkit_settings: settings saved
-  by older versions are not carried over.
-- The test suite runs with an isolated Blender configuration and can no
-  longer touch the user's preferences.
-
-**0.9.2**: safety release. The animated-focus track shipped in 0.9.1 could
-crash Unreal's Sequencer when the synced sequence was opened (a UE 5.8
-limitation on python-authored focus tracks). The track is no longer created;
-animated focus falls back to its first-frame value. Also adds the one-click
-**Enable Native Updates** button (preferences and Advanced panel).
-
-**0.9.1**:
-
-- Connection Doctor: on a failed send, a dialog reads the Unreal project
-  files, shows what is missing (Python plugin, USD Importer, remote
-  execution) and fixes it with backups.
-- Progress feedback during the sync (per-phase cursor and status text).
-- Sync dialog options remembered per scene.
-- Animated depth of field sampled per frame (rolled back to static in 0.9.2,
-  see above).
-- Mirrored (negative-scale) objects keep their mirroring everywhere
-  (placement, animation, skeletal).
-- Skeletal export neutralizes the full root transform (no more double
-  rotation/scale on spawn).
-- Correct FOV for vertical and auto sensor fit (portrait renders).
-- Asset matching by mesh-data name (object names that sanitize identically
-  no longer collide).
-- Native update channel through a self-hosted extension repository.
-- "How it works" and FAQ sections in this README.
+**0.9.3**: Auto Clean, Optimize AI Meshes (with Mark as Hero), Scene Weight
+Report, Merge Duplicate Materials and Images, Rejoin Material Splits, Split
+Repeated Parts, Rescale Rig + Animation, Fix Bone Lengths, report window,
+Choose Project. Materials built on the Kelit master material, Two-Sided and
+Alpha options, static geometry import cache, collection fallback for the
+send. Fixes for skeletal export, origin presets on parented objects, UCX,
+the Connection Doctor and EEVEE crashes on deletion. Operator ids moved to
+`kelit_toolkit.*`: settings saved by older versions are not carried over.
 
 <details>
-<summary>Development history</summary>
+<summary>Earlier versions</summary>
 
-- 0.9.0: first shared pre-release: full code audit and hardening pass
-  (instance-safe applies with shape-key support, convex UCX, scene-scoped
-  cleanups, linked-data guards, filename dedup, texture tool fixes,
-  large-scene performance), headless regression suite, Send2UE integration
-  removed (the USD workflow replaced it)
-- 0.8: animated hierarchies preserved through the sync (parent-space keys),
-  editable keyframes with a calibrated tangent model, camera package as
-  spawnables, Attach Tracks in self-contained sequences, transport fixes
-- 0.7: unified file export, quick tool search, Normalize Scene Scale,
-  camera-safe scene cleaning, panel reorganized into workflow sections
-- 0.6: standalone remote transport (Epic's client vendored)
-- 0.5: spawnable sequences, camera depth of field, safe binding naming
-- 0.4: material bridge (master material + instances, texture export)
-- 0.3: native LevelSequence animation, CineCameraActor + Camera Cuts
-- 0.2: USD Scene Sync, per-object re-sync, batch FBX rewrite
-- 0.1: modular reorganization of the original single-file toolkit
+- 0.9.2: safety release. The animated-focus track of 0.9.1 could crash
+  Unreal's Sequencer; animated focus falls back to its first-frame value.
+  One-click **Enable Native Updates**.
+- 0.9.1: Connection Doctor, progress feedback, remembered send options,
+  mirrored objects kept, skeletal root neutralized, vertical sensor fit,
+  native update channel.
+- 0.9.0: first shared pre-release: full audit and hardening, headless test
+  suite, Send2UE integration removed.
+- 0.8: animated hierarchies, editable keyframes, camera as spawnables,
+  Attach Tracks.
+- 0.7: unified file export, tool search, Normalize Scene Scale, panel in
+  workflow sections.
+- 0.6: standalone remote transport.
+- 0.5: spawnable sequences, camera depth of field.
+- 0.4: master material and instances.
+- 0.3: native LevelSequence animation, CineCamera and Camera Cuts.
+- 0.2: USD Scene Sync, per-object re-sync, batch FBX.
+- 0.1: modular reorganization of the original single-file toolkit.
 
 </details>
 
@@ -379,7 +343,6 @@ License v3.0 or later**, see [LICENSE](LICENSE).
 the MIT-licensed [BlenderTools](https://github.com/poly-hammer/BlenderTools)
 project and redistributed under its own terms, see
 [dependencies/LICENSE-BlenderTools.txt](dependencies/LICENSE-BlenderTools.txt).
-The coordinate conversions follow the same convention as BlenderTools.
 
 Artwork, scenes and assets produced with this add-on are yours and are not
-covered by this licence.
+covered by this license.

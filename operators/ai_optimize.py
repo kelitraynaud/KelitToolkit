@@ -309,10 +309,7 @@ def _faces(value):
 
 
 class OBJECT_OT_optimize_ai_meshes(bpy.types.Operator):
-    """Decimate AI-generated props (Meshy, Tripo, Hunyuan...): dense triangle
-    soups get a Collapse decimation to a face budget proportional to their
-    surface. UV layers remain but visual detail can change: compare at the
-    final camera distance. Non-destructive by default"""
+    """Decimate dense AI-generated props to a face budget per square metre. Adds a removable KT_Optimize modifier; Apply makes it permanent"""
     bl_idname = "kelit_toolkit.optimize_ai_meshes"
     bl_label = "Optimize AI Meshes"
     bl_options = {'REGISTER', 'UNDO'}
@@ -478,8 +475,7 @@ class OBJECT_OT_optimize_ai_meshes(bpy.types.Operator):
 
 
 class OBJECT_OT_remove_ai_optimize(bpy.types.Operator):
-    """Remove KT_Optimize modifiers and unused UV protection groups.
-    Destructive Apply cannot be undone here: use Undo or the saved reference"""
+    """Remove the KT_Optimize modifiers added by Optimize AI Meshes (whole scene by default). Does not undo a destructive Apply"""
     bl_idname = "kelit_toolkit.remove_ai_optimize"
     bl_label = "Remove KT_Optimize"
     bl_options = {'REGISTER', 'UNDO'}
@@ -497,10 +493,7 @@ class OBJECT_OT_remove_ai_optimize(bpy.types.Operator):
 
 
 class OBJECT_OT_mark_ai_hero(bpy.types.Operator):
-    """Give the selected objects a minimum decimation ratio for Optimize AI
-    Meshes (objects seen up close: a low ratio damages UV seams). Every
-    object in the selection gets it. Ratio 0 removes the mark, 1 restores the
-    undecimated mesh when Optimize AI Meshes is run again"""
+    """Set a minimum decimation ratio on the selected objects for Optimize AI Meshes (objects seen up close). 0 removes the mark"""
     bl_idname = "kelit_toolkit.mark_ai_hero"
     bl_label = "Mark as Hero"
     bl_options = {'REGISTER', 'UNDO'}

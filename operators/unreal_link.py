@@ -391,10 +391,7 @@ class UNREAL_OT_test_connection(bpy.types.Operator):
 
 
 class UNREAL_OT_fix_interchange_permanent(bpy.types.Operator):
-    """Write 'Interchange.FeatureFlags.Import.FBX=False' into the project's
-    Config/DefaultEngine.ini so FBX files imported into Unreal use the legacy
-    FBX importer. A .bak backup of the file is created first (requires an
-    Unreal restart)"""
+    """Make Unreal 5.5+ use its legacy FBX importer for files imported by hand. Edits Config/DefaultEngine.ini with a backup; restart Unreal after"""
     bl_idname = "kelit_toolkit.fix_interchange_permanent"
     bl_label = "Fix Interchange FBX (Permanent)"
     bl_options = {'REGISTER'}

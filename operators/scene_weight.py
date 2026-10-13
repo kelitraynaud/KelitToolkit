@@ -330,13 +330,7 @@ def _mem(value):
 
 
 class OBJECT_OT_scene_weight_report(bpy.types.Operator):
-    """List what weighs at RENDER time: rendered objects by triangle count
-    (hidden in the viewport but rendered included, render-disabled skipped),
-    modifiers, collection instances and particles counted, shared meshes
-    flagged, and textures by memory. PNG and JPEG sizes are read from the
-    file header; images in other formats (EXR, TIFF, TGA...) are loaded to
-    read their size, which can take a while. Click a line to select its
-    object"""
+    """List what weighs at render time: triangles per object, shared meshes, textures by memory, heavy subdivisions. Reads only, changes nothing"""
     bl_idname = "kelit_toolkit.scene_weight_report"
     bl_label = "Scene Weight Report"
     bl_options = {'REGISTER'}

@@ -2518,11 +2518,7 @@ def parse_sync_result(output):
 # ============================================================================
 
 class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
-    """Send the scene to Unreal via USD: separate assets with material fidelity,
-    one actor per object at its exact position, hierarchy rebuilt with
-    attachments. Standalone: needs only UE's USD Importer plugin and Python
-    remote execution enabled. Note: re-syncing rebuilds the LevelSequence
-    from scratch - tracks added to it by hand are cleared"""
+    """Send the selection (or a collection) to the open Unreal project: assets, actors, materials and, as an option, a LevelSequence with the animation"""
     bl_idname = "kelit_toolkit.usd_scene_sync"
     bl_label = "Send to Unreal"
     bl_options = {'REGISTER'}
@@ -3389,11 +3385,7 @@ except Exception:
 
 
 class UNREAL_OT_usd_make_spawnable(bpy.types.Operator):
-    """Turn the LevelSequence's bindings into spawnables, so the sequence
-    carries its own actors and can be opened in any level. The synced
-    hierarchy survives: level attachments are replayed as Attach Tracks,
-    and static objects join the sequence with their level transform.
-    Run this after 'Send Scene via USD' (and after building materials)"""
+    """Turn the actors of this .blend's LevelSequence into spawnables, so the sequence plays in any level. Run after Send to Unreal"""
     bl_idname = "kelit_toolkit.usd_make_spawnable"
     bl_label = "Make Sequence Self-Contained"
     bl_options = {'REGISTER'}

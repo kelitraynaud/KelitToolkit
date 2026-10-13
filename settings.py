@@ -99,10 +99,7 @@ def find_update_repo(context):
 
 
 class PREFERENCES_OT_setup_update_repo(bpy.types.Operator):
-    """Register the Kelit Toolkit extension repository in Blender, so new
-    versions show up natively in Preferences > Get Extensions. If you then
-    install the toolkit from that repository, remove this zip-installed copy
-    to avoid running two versions at once"""
+    """Add the Kelit Toolkit update repository to Blender and save the preferences, so new versions appear in Get Extensions"""
     bl_idname = "kelit_toolkit.setup_update_repo"
     bl_label = "Enable Native Updates"
     bl_options = {'REGISTER'}

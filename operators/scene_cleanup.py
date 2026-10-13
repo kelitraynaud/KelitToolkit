@@ -179,10 +179,7 @@ class OBJECT_OT_clean_vertex_groups(bpy.types.Operator):
 
 
 class OBJECT_OT_delete_unused_empties(bpy.types.Operator):
-    """Delete empties that serve no purpose, while protecting anything a
-    camera rig or an animation still needs (parents of cameras, constraint
-    and DOF targets, animated parents). Children are re-parented with their
-    world transform preserved"""
+    """Delete empties nothing needs, keeping their children in place. Camera rigs, constraint targets and animated parents are kept"""
     bl_idname = "kelit_toolkit.delete_unused_empties"
     bl_label = "Delete Unused Empties"
     bl_options = {'REGISTER', 'UNDO'}

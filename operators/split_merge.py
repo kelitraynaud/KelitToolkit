@@ -95,11 +95,7 @@ def split_groups(objects, refused=None):
 
 
 class OBJECT_OT_rejoin_material_splits(bpy.types.Operator):
-    """Join back objects that an export cut into one object per material
-    (SM_Box074Material260 + SM_Box074Material310 become SM_Box074 with two
-    material slots). Groups are found from the names; members that share
-    their mesh with other objects, or sit under different parents, are left
-    alone"""
+    """Join back objects an export cut into one object per material (Box074Material260, Box074Material310) into one object with several slots"""
     bl_idname = "kelit_toolkit.rejoin_material_splits"
     bl_label = "Rejoin Material Splits"
     bl_options = {'REGISTER', 'UNDO'}
@@ -327,11 +323,7 @@ def extract_unit(source_bm, verts, centroid, template_mesh, name):
 
 
 class OBJECT_OT_split_repeated_parts(bpy.types.Operator):
-    """Find the elements repeated inside a mesh (the same box 16 times, the
-    same balcony 4 times) and give them back as instances of one shared
-    mesh, placed where they were. Pieces that touch each other count as one
-    element, so a balcony stays a balcony; unique pieces stay in the object.
-    Rotated copies are not recognised, only moved ones"""
+    """Turn elements repeated inside the selected meshes into instances of one shared mesh. Pieces that touch stay together; small pieces stay in place"""
     bl_idname = "kelit_toolkit.split_repeated_parts"
     bl_label = "Split Repeated Parts"
     bl_options = {'REGISTER', 'UNDO'}
