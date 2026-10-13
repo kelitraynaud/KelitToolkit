@@ -26,10 +26,51 @@ from ..utils import clean_name, mesh_users
 SPLIT_PATTERN = re.compile(r'^(?P<base>.+?)Material[A-Za-z0-9]*$')
 
 
-def split_groups(objects):
+_MODIFIER_SKIP = {'name', 'show_expanded', 'show_viewport', 'show_render', 'show_in_editmode',
+                  'show_on_cage', 'is_active', 'is_override_data_editable', 'persistent_uid',
+                  'use_pin_to_last', 'execution_time', 'rna_type', 'show_expanded_panel'}
+
+
+def _modifier_value(value):
+    if isinstance(value, (bool, int, float, str)) or value is None:
+        return value
+    if isinstance(value, bpy.types.ID):
+        return ('ID', value.name)
+    if isinstance(value, (set, frozenset)):
+        return tuple(sorted(str(item) for item in value))
+    try:
+        return tuple(_modifier_value(item) for item in value)
+    except TypeError:
+        return repr(type(value))
+
+
+def modifier_stack(obj):
+    """Comparable description of an object's modifier stack: type and
+    settings of each modifier, in order."""
+    stack = []
+    for modifier in obj.modifiers:
+        settings = []
+        for prop in modifier.bl_rna.properties:
+            if prop.identifier in _MODIFIER_SKIP or prop.type == 'COLLECTION':
+                continue
+            try:
+                value = getattr(modifier, prop.identifier)
+            except Exception:
+                continue
+            if prop.type == 'POINTER' and not isinstance(value, (bpy.types.ID, type(None))):
+                continue
+            settings.append((prop.identifier, _modifier_value(value)))
+        stack.append((modifier.type, tuple(settings)))
+    return tuple(stack)
+
+
+def split_groups(objects, refused=None):
     """Objects whose names share a base before a trailing 'Material...'
     token, grouped by base (Blender suffixes ignored). Only groups whose
-    members are single-user meshes with the same parent are returned."""
+    members are single-user meshes with the same parent and the same
+    modifier stack are returned (joining keeps only the first member's
+    modifiers). Groups left out for their modifiers are added to `refused`
+    as (base, reason) when a list is given."""
     groups = defaultdict(list)
     for obj in objects:
         if obj.type != 'MESH' or obj.data is None or obj.library is not None:
@@ -44,6 +85,10 @@ def split_groups(objects):
         if any(len(mesh_users(obj.data)) > 1 for obj in members):
             continue
         if len({obj.parent.name if obj.parent else '' for obj in members}) > 1:
+            continue
+        if len({modifier_stack(obj) for obj in members}) > 1:
+            if refused is not None:
+                refused.append((base, "members have different modifiers"))
             continue
         result.append((base, sorted(members, key=lambda o: o.name)))
     return sorted(result, key=lambda item: item[0])
@@ -77,7 +122,12 @@ class OBJECT_OT_rejoin_material_splits(bpy.types.Operator):
         return [obj for obj in pool if obj.visible_get()]
 
     def invoke(self, context, event):
-        if not split_groups(self._objects(context)):
+        refused = []
+        if not split_groups(self._objects(context), refused):
+            if refused:
+                self.report({'WARNING'}, "Nothing to join: " + "; ".join(
+                    f"{base} ({reason})" for base, reason in refused))
+                return {'CANCELLED'}
             self.report({'INFO'}, "No object split by material found (names ending in Material...)")
             return {'CANCELLED'}
         return context.window_manager.invoke_props_dialog(self, width=440)
@@ -85,7 +135,8 @@ class OBJECT_OT_rejoin_material_splits(bpy.types.Operator):
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "search_scope")
-        groups = split_groups(self._objects(context))
+        refused = []
+        groups = split_groups(self._objects(context), refused)
         joined = sum(len(members) for _base, members in groups)
         layout.label(text=f"{joined} object(s) will become {len(groups)}", icon='INFO')
         box = layout.box()
@@ -93,11 +144,18 @@ class OBJECT_OT_rejoin_material_splits(bpy.types.Operator):
             box.label(text=f"  {base}: {len(members)} parts")
         if len(groups) > 6:
             box.label(text=f"  ... and {len(groups) - 6} more")
+        for base, reason in refused[:4]:
+            layout.label(text=f"{base} skipped: {reason}", icon='ERROR')
 
     def execute(self, context):
-        groups = split_groups(self._objects(context))
+        refused = []
+        groups = split_groups(self._objects(context), refused)
+        refused_text = "; ".join(f"{base} skipped ({reason})" for base, reason in refused)
         if not groups:
-            self.report({'INFO'}, "No object split by material found")
+            if refused:
+                self.report({'WARNING'}, "Nothing joined - " + refused_text)
+            else:
+                self.report({'INFO'}, "No object split by material found")
             return {'CANCELLED'}
         previous_selection = [obj.name for obj in context.selected_objects]
         joined = 0
@@ -118,7 +176,10 @@ class OBJECT_OT_rejoin_material_splits(bpy.types.Operator):
             joined += len(members) - 1
         for obj in context.view_layer.objects:
             obj.select_set(obj.name in previous_selection)
-        self.report({'INFO'}, f"{joined} part(s) joined into {len(groups)} object(s)")
+        message = f"{joined} part(s) joined into {len(groups)} object(s)"
+        if refused:
+            message += " - " + refused_text
+        self.report({'WARNING'} if refused else {'INFO'}, message)
         return {'FINISHED'}
 
 
@@ -186,16 +247,45 @@ def cluster_parts(parts, tolerance):
     return list(clusters.values())
 
 
+def unit_signatures(bm, units):
+    """(signature, centroid) of every unit: shape, materials and UVs of the
+    active layer, independent of where the unit sits. One pass over the
+    faces for all units (a face belongs to the unit of its vertices)."""
+    unit_of = {}
+    centroids = []
+    rounded = {}
+    for number, verts in enumerate(units):
+        centroid = sum((v.co for v in verts), mathutils.Vector()) / len(verts)
+        centroids.append(centroid)
+        for vertex in verts:
+            unit_of[vertex.index] = number
+            rounded[vertex.index] = tuple(round(c, 4) for c in (vertex.co - centroid))
+    materials = [[] for _unit in units]
+    uvs = [[] for _unit in units]
+    uv_layer = bm.loops.layers.uv.active
+    for face in bm.faces:
+        number = unit_of.get(face.verts[0].index)
+        if number is None:
+            continue
+        materials[number].append(face.material_index)
+        if uv_layer is not None:
+            # per loop, keyed by the loop's vertex position: the same
+            # canonical order as the sorted coordinates
+            for loop in face.loops:
+                uv = loop[uv_layer].uv
+                uvs[number].append((rounded[loop.vert.index], round(uv.x, 4), round(uv.y, 4)))
+    result = []
+    for number, verts in enumerate(units):
+        coords = tuple(sorted(rounded[v.index] for v in verts))
+        signature = (len(verts), coords, tuple(sorted(materials[number])),
+                     tuple(sorted(uvs[number])))
+        result.append((signature, centroids[number]))
+    return result
+
+
 def cluster_signature(bm, verts):
-    """Shape + materials of a unit, independent of where it sits."""
-    centroid = sum((v.co for v in verts), mathutils.Vector()) / len(verts)
-    coords = tuple(sorted(
-        tuple(round(component, 4) for component in (v.co - centroid)) for v in verts))
-    vert_set = set(v.index for v in verts)
-    materials = tuple(sorted(
-        face.material_index for face in bm.faces
-        if all(v.index in vert_set for v in face.verts)))
-    return (len(verts), coords, materials), centroid
+    """Shape + materials + UVs of one unit, independent of where it sits."""
+    return unit_signatures(bm, [verts])[0]
 
 
 def analyse_repeats(obj, min_vertices, min_repeats, tolerance_ratio):
@@ -211,10 +301,8 @@ def analyse_repeats(obj, min_vertices, min_repeats, tolerance_ratio):
     tolerance = max(obj.dimensions) * tolerance_ratio if max(obj.dimensions) > 0 else 1e-4
     units = cluster_parts(parts, tolerance)
     groups = defaultdict(list)
-    for verts in units:
-        if len(verts) < min_vertices:
-            continue
-        signature, centroid = cluster_signature(bm, verts)
+    candidates = [verts for verts in units if len(verts) >= min_vertices]
+    for verts, (signature, centroid) in zip(candidates, unit_signatures(bm, candidates)):
         groups[signature].append((verts, centroid))
     repeated = [(signature, items) for signature, items in groups.items()
                 if len(items) >= min_repeats]
@@ -335,6 +423,11 @@ class OBJECT_OT_split_repeated_parts(bpy.types.Operator):
             bmesh.ops.delete(bm, geom=doomed, context='VERTS')
             if len(bm.verts) == 0:
                 bm.free()
+                # its children stay where they are, under its own parent
+                for child in list(obj.children):
+                    child_world = child.matrix_world.copy()
+                    child.parent = obj.parent
+                    child.matrix_world = child_world
                 bpy.data.objects.remove(obj, do_unlink=True)
             else:
                 bm.to_mesh(obj.data)

@@ -106,7 +106,7 @@ verts_before = evaluated_verts(10)
 t.deselect_all()
 armature.select_set(True)
 bpy.context.view_layer.objects.active = armature
-bpy.ops.kelit_toolkit.fix_bone_lengths('EXEC_DEFAULT')
+bpy.ops.kelit_toolkit.fix_bone_lengths('EXEC_DEFAULT', stray_joints=True, drop_stray_keys=True)
 scene.frame_set(10)
 t.check('finger_shortened', arm_data.bones['Finger'].length < 0.51, arm_data.bones['Finger'].length)
 t.check('finger_orientation_kept', all(

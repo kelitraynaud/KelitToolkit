@@ -821,6 +821,43 @@ def rig_actions(armature):
     return actions
 
 
+def _rig_action_slots(armature):
+    """{action pointer: set of slot identifiers this armature plays}. An
+    empty set means the slot is unknown (legacy action): no filtering."""
+    slots = {}
+    anim = armature.animation_data
+    if anim is None:
+        return slots
+
+    def add(action, slot):
+        if action is None:
+            return
+        entry = slots.setdefault(action.as_pointer(), set())
+        if slot is not None:
+            entry.add(slot.identifier)
+
+    add(anim.action, getattr(anim, 'action_slot', None))
+    for track in anim.nla_tracks:
+        for strip in track.strips:
+            add(strip.action, getattr(strip, 'action_slot', None))
+    return slots
+
+
+def _rig_channelbags(armature):
+    """(action, channelbag) pairs holding this armature's curves: other
+    slots of a shared action (another rig) are left out."""
+    slots = _rig_action_slots(armature)
+    for action in rig_actions(armature):
+        wanted = slots.get(action.as_pointer(), set())
+        for layer in getattr(action, 'layers', []):
+            for strip in getattr(layer, 'strips', ()):
+                for bag in getattr(strip, 'channelbags', ()):
+                    slot = getattr(bag, 'slot', None)
+                    if wanted and slot is not None and slot.identifier not in wanted:
+                        continue
+                    yield action, bag
+
+
 def scale_fcurve(fcurve, factor):
     for key in fcurve.keyframe_points:
         key.co.y *= factor
@@ -829,12 +866,125 @@ def scale_fcurve(fcurve, factor):
     fcurve.update()
 
 
-def fix_bone_lengths(context, armature, ratio=2.0):
+# end bones with these names are rig machinery (UE mannequin ik_hand_gun,
+# weapon sockets, attach points, roots, IK targets and poles, controls):
+# their position is meaningful even with no weight, never "fixed"
+PROTECTED_BONE_WORDS = ('socket', 'attach', 'root', 'target', 'pole', 'ctrl')
+_BONE_PATH = re.compile(r'bones\["((?:[^"\\]|\\.)*)"\]')
+
+
+def is_protected_bone_name(name):
+    lowered = name.lower()
+    return lowered.startswith('ik_') or any(word in lowered for word in PROTECTED_BONE_WORDS)
+
+
+def referenced_bones(context, armature):
+    """Bones of `armature` something else relies on: constraint targets and
+    poles (on any object of the scene or bone of any rig), driver targets,
+    bones with constraints of their own, bones objects are parented to."""
+    names = set()
+
+    def from_constraint(con):
+        for target_attr, sub_attr in (('target', 'subtarget'), ('pole_target', 'pole_subtarget')):
+            if getattr(con, target_attr, None) == armature:
+                sub = getattr(con, sub_attr, '')
+                if sub:
+                    names.add(sub)
+        for target in getattr(con, 'targets', None) or ():
+            if getattr(target, 'target', None) == armature and getattr(target, 'subtarget', ''):
+                names.add(target.subtarget)
+
+    def from_drivers(id_data):
+        anim = getattr(id_data, 'animation_data', None) if id_data is not None else None
+        if anim is None:
+            return
+        for fcurve in anim.drivers:
+            if id_data == armature or id_data == armature.data:
+                names.update(_BONE_PATH.findall(fcurve.data_path))
+            for variable in fcurve.driver.variables:
+                for target in variable.targets:
+                    if target.id is None or target.id not in (armature, armature.data):
+                        continue
+                    if target.bone_target:
+                        names.add(target.bone_target)
+                    names.update(_BONE_PATH.findall(target.data_path or ''))
+
+    objects = list(context.scene.objects)
+    if armature not in objects:
+        objects.append(armature)
+    for obj in objects:
+        for con in obj.constraints:
+            from_constraint(con)
+        if obj.pose is not None:
+            for pose_bone in obj.pose.bones:
+                for con in pose_bone.constraints:
+                    from_constraint(con)
+                if obj == armature and len(pose_bone.constraints):
+                    names.add(pose_bone.name)
+        if obj.parent == armature and obj.parent_type == 'BONE' and obj.parent_bone:
+            names.add(obj.parent_bone)
+        from_drivers(obj)
+        from_drivers(obj.data)
+        shape_keys = getattr(obj.data, 'shape_keys', None)
+        if shape_keys is not None:
+            from_drivers(shape_keys)
+    return names
+
+
+def bone_fix_blocker(context, armature):
+    """Why Fix Bone Lengths cannot edit this armature, or None."""
+    if armature.library is not None or armature.data.library is not None:
+        return f"{armature.name}: linked from another file"
+    if context.view_layer.objects.get(armature.name) != armature:
+        return f"{armature.name}: not in the current view layer"
+    if not armature.visible_get():
+        return f"{armature.name}: hidden, unhide it to fix its bones"
+    return None
+
+
+def _location_curves(armature, bone_name):
+    path = f'pose.bones["{bpy.utils.escape_identifier(bone_name)}"].location'
+    return [(bag, fcurve) for _action, bag in _rig_channelbags(armature)
+            for fcurve in bag.fcurves if fcurve.data_path == path]
+
+
+def _offset_keys_only(curves, threshold):
+    """True when, at every keyed frame, the location keys throw the bone
+    farther than `threshold` from its rest: the large constant offset an
+    import bakes into a stray joint, not real motion."""
+    frames = sorted({key.co.x for _bag, fcurve in curves for key in fcurve.keyframe_points})
+    if not frames:
+        return False
+    for frame in frames:
+        vector = mathutils.Vector((0.0, 0.0, 0.0))
+        for _bag, fcurve in curves:
+            if 0 <= fcurve.array_index < 3:
+                vector[fcurve.array_index] = fcurve.evaluate(frame)
+        if vector.length <= threshold:
+            return False
+    return True
+
+
+def fix_bone_lengths(context, armature, ratio=2.0, stray_joints=True,
+                     drop_stray_keys=False, notes=None):
     """Shorten bones whose length is out of proportion (glTF/FBX imports
     guess bone tails and fingertips come out metres long). Only the length
     changes: head, direction and roll stay, so the bone's orientation, the
     skinning and every animation are untouched. Bones with a connected child
-    are left alone (their tail is that child's head). Returns the count."""
+    are left alone (their tail is that child's head).
+
+    `stray_joints` also brings back unweighted end joints sitting far from
+    their parent. IK, socket, attach, root, target, pole and control bones,
+    and bones anything targets, are never moved. A stray joint with location
+    keys only moves when `drop_stray_keys` is on AND those keys are only the
+    import's large offset; the keys are then deleted. Returns the count;
+    reasons for skipped work go to `notes` (a list) when given."""
+    notes = notes if notes is not None else []
+    blocker = bone_fix_blocker(context, armature)
+    if blocker:
+        notes.append(blocker)
+        return 0
+
     # bones that deform something: an end bone with no weight anywhere can
     # be moved freely, nothing on screen depends on its position
     weighted = set()
@@ -847,28 +997,43 @@ def fix_bone_lengths(context, armature, ratio=2.0):
             for element in vertex.groups:
                 if element.weight > 1e-4:
                     weighted.add(names.get(element.group))
+    referenced = referenced_bones(context, armature)
 
     previous_active = context.view_layer.objects.active
-    context.view_layer.objects.active = armature
-    bpy.ops.object.mode_set(mode='EDIT')
     fixed = 0
+    moved = []
+    drop = []
+    kept = []
     try:
+        context.view_layer.objects.active = armature
+        bpy.ops.object.mode_set(mode='EDIT')
         bones = armature.data.edit_bones
         lengths = sorted(bone.length for bone in bones)
         median = lengths[len(lengths) // 2] if lengths else 0.0
 
-        moved = []
         # 1) stray end joints: an unweighted end bone sitting far away from
         # its parent (fingertip joints exported metres off) comes back to the
         # end of its parent, along the parent's direction, one segment away
-        for bone in bones:
+        for bone in (bones if stray_joints else ()):
             parent = bone.parent
             if bone.children or parent is None or bone.name in weighted or bone.use_connect:
                 continue
+            if is_protected_bone_name(bone.name) or bone.name in referenced:
+                continue
             segment = (parent.head - parent.parent.head).length if parent.parent else parent.length
             segment = segment if segment > 1e-6 else median
-            if (bone.head - parent.head).length <= ratio * max(segment, median):
+            threshold = ratio * max(segment, median)
+            if (bone.head - parent.head).length <= threshold:
                 continue
+            curves = _location_curves(armature, bone.name)
+            if curves:
+                # its position is animated: moving the rest would move
+                # where the animation puts it, unless those keys are only
+                # the import's offset and the user agreed to drop them
+                if not drop_stray_keys or not _offset_keys_only(curves, threshold):
+                    kept.append(bone.name)
+                    continue
+                drop.extend(curves)
             # along the PARENT's own axis: the parent (which does deform) then
             # only needs a shorter length in step 2, never a new orientation,
             # which would change how its animation bends the mesh
@@ -903,6 +1068,10 @@ def fix_bone_lengths(context, armature, ratio=2.0):
         for bone in sorted(bones, key=depth):
             if any(child.use_connect for child in bone.children):
                 continue
+            # a constrained or targeted bone (IK tip reaching with its tail)
+            # keeps its length: the result of the constraint depends on it
+            if bone.name in referenced:
+                continue
             found = limits(bone)
             if found is None:
                 continue
@@ -911,22 +1080,24 @@ def fix_bone_lengths(context, armature, ratio=2.0):
                 bone.length = target
                 fixed += 1
     finally:
-        bpy.ops.object.mode_set(mode='OBJECT')
+        if armature.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
         context.view_layer.objects.active = previous_active
 
     # the animation of a stray joint keeps translating it out to where the
-    # file had put it (the fingertips kept flying after the rest fix). Those
-    # bones deform nothing: their position keys are dropped, they now ride
-    # at the end of their phalanx; rotation keys stay
-    paths = {f'pose.bones["{name}"].location' for name in moved}
-    for action in rig_actions(armature):
-        for layer in getattr(action, 'layers', []):
-            for strip in layer.strips:
-                for bag in strip.channelbags:
-                    for fcurve in [fc for fc in bag.fcurves if fc.data_path in paths]:
-                        bag.fcurves.remove(fcurve)
+    # file had put it (the fingertips kept flying after the rest fix). Only
+    # with drop_stray_keys, and only keys that are that offset: removed,
+    # the joint now rides at the end of its phalanx; rotation keys stay
+    for bag, fcurve in drop:
+        try:
+            bag.fcurves.remove(fcurve)
+        except (RuntimeError, ReferenceError):
+            pass
     for name in moved:
         armature.pose.bones[name].location = (0.0, 0.0, 0.0)
+    if kept:
+        notes.append(f"{armature.name}: {len(kept)} stray joint(s) with position keys kept "
+                     f"({', '.join(kept[:3])}{'...' if len(kept) > 3 else ''})")
     return fixed
 
 
@@ -934,7 +1105,8 @@ class OBJECT_OT_fix_bone_lengths(bpy.types.Operator):
     """Shorten bones that are far too long for their place in the rig
     (fingertips several metres long after a glTF or FBX import). Only the
     length changes: orientation, skinning and animations stay exactly the
-    same, Unreal reads joints only"""
+    same, Unreal reads joints only. IK, socket, root and targeted bones are
+    never moved"""
     bl_idname = "kelit_toolkit.fix_bone_lengths"
     bl_label = "Fix Bone Lengths"
     bl_options = {'REGISTER', 'UNDO'}
@@ -945,19 +1117,55 @@ class OBJECT_OT_fix_bone_lengths(bpy.types.Operator):
                     "the distance to its child (or its parent's length for end bones)",
         default=2.0, min=1.1, max=20.0
     )
+    stray_joints: bpy.props.BoolProperty(
+        name="Bring Back Stray Joints",
+        description="Move unweighted end joints sitting far from their parent back to "
+                    "the end of the parent. Bones named ik_*, *socket*, *attach*, *root*, "
+                    "*target*, *pole*, *ctrl*, and bones used by a constraint, a driver "
+                    "or a bone-parented object are never moved",
+        default=True
+    )
+    drop_stray_keys: bpy.props.BoolProperty(
+        name="Delete Stray Joint Position Keys",
+        description="A stray joint whose position keys only hold the import's large "
+                    "offset gets those location keys DELETED so it stays home. Off: "
+                    "animated stray joints are left where they are",
+        default=True
+    )
 
     @classmethod
     def poll(cls, context):
         return context.mode == 'OBJECT' and any(
             obj.type == 'ARMATURE' for obj in context.selected_objects)
 
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "ratio")
+        layout.prop(self, "stray_joints")
+        row = layout.row()
+        row.enabled = self.stray_joints
+        row.prop(self, "drop_stray_keys")
+        if self.stray_joints and self.drop_stray_keys:
+            layout.label(text="Location keys of the stray joints moved will be deleted",
+                         icon='ERROR')
+        layout.label(text="IK, socket, root and targeted bones are never moved", icon='INFO')
+
     def execute(self, context):
         fixed = 0
+        notes = []
         rigs = [obj for obj in context.selected_objects
                 if obj.type == 'ARMATURE' and obj.library is None]
         for armature in rigs:
-            fixed += fix_bone_lengths(context, armature, self.ratio)
-        self.report({'INFO'}, f"{fixed} bone(s) shortened on {len(rigs)} rig(s)")
+            fixed += fix_bone_lengths(context, armature, self.ratio,
+                                      stray_joints=self.stray_joints,
+                                      drop_stray_keys=self.drop_stray_keys, notes=notes)
+        message = f"{fixed} bone(s) fixed on {len(rigs)} rig(s)"
+        if notes:
+            message += " - " + "; ".join(notes)
+        self.report({'WARNING'} if notes else {'INFO'}, message)
         return {'FINISHED'}
 
 
@@ -986,8 +1194,9 @@ class OBJECT_OT_rescale_rig_animation(bpy.types.Operator):
     fix_lengths: bpy.props.BoolProperty(
         name="Fix Bone Lengths",
         description="Also shorten bones far too long for their place in the rig "
-                    "(display only: orientation and animation are untouched)",
-        default=True
+                    "(display only: orientation and animation are untouched; no "
+                    "position key is ever deleted from here)",
+        default=False
     )
 
     @classmethod
@@ -1020,6 +1229,15 @@ class OBJECT_OT_rescale_rig_animation(bpy.types.Operator):
                     m.type == 'ARMATURE' and m.object == armature for m in obj.modifiers):
                 meshes.append(obj)
         return meshes
+
+    @staticmethod
+    def _is_descendant(obj, ancestor):
+        parent = obj.parent
+        while parent is not None:
+            if parent == ancestor:
+                return True
+            parent = parent.parent
+        return False
 
     def invoke(self, context, event):
         if not self._armatures(context):
@@ -1071,27 +1289,81 @@ class OBJECT_OT_rescale_rig_animation(bpy.types.Operator):
             removed += 1
         return removed
 
+    def _refusal(self, context, armature, meshes):
+        """Why this rig cannot be rescaled, checked before anything changes."""
+        scale = armature.scale
+        if max(scale) - min(scale) > 1e-6 * max(abs(v) for v in scale):
+            return f"{armature.name} (non-uniform scale)"
+        users = [obj for obj in bpy.data.objects if obj.data == armature.data]
+        if len(users) > 1 or armature.data.library is not None:
+            return f"{armature.name} (armature data shared with {len(users) - 1} other object(s))"
+        shared = [m for m in meshes if len(mesh_users(m.data)) > 1]
+        if shared:
+            return f"{armature.name} (shared mesh {shared[0].name})"
+        for obj in [armature] + meshes:
+            if context.view_layer.objects.get(obj.name) != obj or not obj.visible_get():
+                return f"{armature.name} ({obj.name} is hidden or not in the view layer)"
+        if self.fix_lengths:
+            blocker = bone_fix_blocker(context, armature)
+            if blocker:
+                return f"{armature.name} ({blocker})"
+        return None
+
     def execute(self, context):
         armatures = self._armatures(context)
         if not armatures:
             self.report({'WARNING'}, "Select an armature, or a mesh skinned to one")
             return {'CANCELLED'}
         factor = self.factor
+        report = {'rigs': 0, 'meshes': 0, 'curves': 0, 'empties': 0, 'skipped': []}
+
+        # every check first: a refused rig is left exactly as it was
+        plans = []
+        refused = []
+        for armature in armatures:
+            meshes = self._skinned_meshes(context, armature)
+            reason = self._refusal(context, armature, meshes)
+            if reason:
+                report['skipped'].append(reason)
+                refused.append(armature)
+            else:
+                plans.append((armature, meshes))
+        # an action shared with a refused rig would change that rig too
+        changed = True
+        while changed:
+            changed = False
+            blocked = {action.as_pointer() for rig in refused for action in rig_actions(rig)}
+            for plan in list(plans):
+                armature = plan[0]
+                common = [a for a in rig_actions(armature) if a.as_pointer() in blocked]
+                if common:
+                    report['skipped'].append(f"{armature.name} (action {common[0].name} shared "
+                                             f"with a skipped rig)")
+                    refused.append(armature)
+                    plans.remove(plan)
+                    changed = True
+        if not plans:
+            self.report({'WARNING'}, "Nothing rescaled - skipped: " + ", ".join(report['skipped']))
+            return {'CANCELLED'}
+
         previous_frame = context.scene.frame_current
         previous_selection = [obj.name for obj in context.selected_objects]
+        previous_active = context.view_layer.objects.active
+        previous_active = previous_active.name if previous_active is not None else None
         context.scene.frame_set(context.scene.frame_start)
 
-        report = {'rigs': 0, 'meshes': 0, 'curves': 0, 'empties': 0, 'skipped': []}
-        done_actions = set()
+        object_done = set()     # actions whose object location keys are scaled
+        bones_done = set()      # actions whose bone location keys are scaled
+        meshes_done = set()
+        notes = []
         try:
-            for armature in armatures:
-                meshes = self._skinned_meshes(context, armature)
-                shared = [m for m in meshes if len(mesh_users(m.data)) > 1]
-                if shared:
-                    report['skipped'].append(f"{armature.name} (shared mesh {shared[0].name})")
-                    continue
+            for armature, meshes in plans:
+                meshes = [m for m in meshes if m.name not in meshes_done]
                 if self.remove_parent_empties:
                     report['empties'] += self._remove_parent_empties(armature, meshes)
+                context.view_layer.update()
+                armature_before = armature.matrix_world.copy()
+                worlds_before = {m.name: m.matrix_world.copy() for m in meshes}
 
                 # scale about the armature's parent-space origin: local
                 # position and scale grow by the factor, object keys follow
@@ -1099,24 +1371,33 @@ class OBJECT_OT_rescale_rig_animation(bpy.types.Operator):
                 armature.scale *= factor
                 actions = rig_actions(armature)
                 for action in actions:
+                    if action.as_pointer() in object_done:
+                        continue
+                    object_done.add(action.as_pointer())
                     for fcurve in iter_action_fcurves(action):
-                        if fcurve.data_path == 'location' and action.name not in done_actions:
+                        if fcurve.data_path == 'location':
                             scale_fcurve(fcurve, factor)
                             report['curves'] += 1
                 context.view_layer.update()
+                # the change the armature went through, in world space: a
+                # mesh skinned only through its modifier (not a child)
+                # follows it the same way, about the armature's origin
+                change = armature.matrix_world @ armature_before.inverted()
+                targets = {}
+                for mesh in meshes:
+                    if self._is_descendant(mesh, armature):
+                        targets[mesh.name] = mesh.matrix_world.copy()
+                    else:
+                        targets[mesh.name] = change @ worlds_before[mesh.name]
 
                 # bake the armature's scale into its bones; bone position keys
                 # are in bone space, so they take the whole applied scale
                 applied = armature.scale.copy()
-                if max(applied) - min(applied) > 1e-6 * max(applied):
-                    report['skipped'].append(f"{armature.name} (non-uniform scale)")
-                    continue
-                child_worlds = {m.name: m.matrix_world.copy() for m in meshes}
                 self._apply_scale(context, armature)
                 for action in actions:
-                    if action.name in done_actions:
+                    if action.as_pointer() in bones_done:
                         continue
-                    done_actions.add(action.name)
+                    bones_done.add(action.as_pointer())
                     for fcurve in iter_action_fcurves(action):
                         if fcurve.data_path.startswith('pose.bones[') and \
                                 fcurve.data_path.endswith('].location'):
@@ -1124,19 +1405,24 @@ class OBJECT_OT_rescale_rig_animation(bpy.types.Operator):
                             report['curves'] += 1
                 context.view_layer.update()
 
-                # skinned meshes: keep their (now smaller) world placement,
+                # skinned meshes: take their (now smaller) world placement,
                 # then bake their own scale into the vertices
                 for mesh in meshes:
-                    mesh.matrix_world = child_worlds[mesh.name]
+                    mesh.matrix_world = targets[mesh.name]
                     context.view_layer.update()
                     self._apply_scale(context, mesh)
+                    meshes_done.add(mesh.name)
                     report['meshes'] += 1
                 if self.fix_lengths:
-                    report['bones'] = report.get('bones', 0) + fix_bone_lengths(context, armature)
+                    report['bones'] = report.get('bones', 0) + fix_bone_lengths(
+                        context, armature, stray_joints=True, drop_stray_keys=False, notes=notes)
                 report['rigs'] += 1
         finally:
             for obj in context.view_layer.objects:
                 obj.select_set(obj.name in previous_selection)
+            active = bpy.data.objects.get(previous_active) if previous_active else None
+            if active is not None and context.view_layer.objects.get(active.name) == active:
+                context.view_layer.objects.active = active
             context.scene.frame_set(previous_frame)
 
         message = (f"Rescaled x{factor:g}: {report['rigs']} rig(s), {report['meshes']} mesh(es), "
@@ -1147,7 +1433,9 @@ class OBJECT_OT_rescale_rig_animation(bpy.types.Operator):
             message += f", {report['bones']} bone length(s) fixed"
         if report['skipped']:
             message += " - skipped: " + ", ".join(report['skipped'])
-        self.report({'WARNING'} if report['skipped'] else {'INFO'}, message)
+        if notes:
+            message += " - " + "; ".join(notes)
+        self.report({'WARNING'} if report['skipped'] or notes else {'INFO'}, message)
         return {'FINISHED'} if report['rigs'] else {'CANCELLED'}
 
 
