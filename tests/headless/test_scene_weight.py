@@ -55,6 +55,94 @@ t.check('material_remapped', node.image is not None and node.image.name in bpy.d
         and node.image.colorspace_settings.name != 'Non-Color')
 t.check('noncolor_survives', 'Non-Color' in {i.colorspace_settings.name for i in bpy.data.images})
 
+# ---- unsaved painting and generated images are never merged ----
+clean_a = bpy.data.images.load(path, check_existing=False)
+clean_b = bpy.data.images.load(path, check_existing=False)
+painted = bpy.data.images.load(path, check_existing=False)
+painted.pixels = [0.9] * (16 * 16 * 4)                # painted, not saved
+generated = bpy.data.images.new('generated_twin', 16, 16)
+t.check('painted_is_dirty', painted.is_dirty)
+skipped_images = []
+groups = materials_mod.find_duplicate_images(skipped_images)
+t.check('dirty_not_merged', all(painted not in g for g in groups)
+        and any(clean_a in g and clean_b in g for g in groups),
+        [[i.name for i in g] for g in groups])
+t.check('skipped_listed', painted in skipped_images and generated in skipped_images,
+        [i.name for i in skipped_images])
+painted_name = painted.name
+bpy.ops.kelit_toolkit.merge_duplicate_images('EXEC_DEFAULT')
+t.check('dirty_survives_merge', bpy.data.images.get(painted_name) is not None
+        and bpy.data.images.get('generated_twin') is not None)
+
+# ---- texture sizes read from the file header, without loading ----
+jpeg_source = bpy.data.images.new('jpeg_source', 48, 16)
+jpeg_source.pixels = [0.4] * (48 * 16 * 4)
+jpeg_path = os.path.join(folder, 'wide.jpg')
+jpeg_source.filepath_raw = jpeg_path
+jpeg_source.file_format = 'JPEG'
+jpeg_source.save()
+bpy.data.images.remove(jpeg_source)
+png_source = bpy.data.images.new('png_source', 64, 32)
+png_path = os.path.join(folder, 'header.png')
+png_source.filepath_raw = png_path
+png_source.file_format = 'PNG'
+png_source.save()
+bpy.data.images.remove(png_source)
+t.fresh_scene()
+header_png = bpy.data.images.load(png_path, check_existing=False)
+header_jpg = bpy.data.images.load(jpeg_path, check_existing=False)
+for image in (header_png, header_jpg):
+    image.use_fake_user = True
+t.check('header_not_loaded_yet', not header_png.has_data and not header_jpg.has_data)
+rows = {row[0]: row for row in weight.texture_weights()}
+t.check('header_png_size', rows.get(header_png.name, (0, 0, 0, 0))[2:4] == (64, 32),
+        rows.get(header_png.name))
+t.check('header_jpg_size', rows.get(header_jpg.name, (0, 0, 0, 0))[2:4] == (48, 16),
+        rows.get(header_jpg.name))
+t.check('header_memory', rows.get(header_png.name, (0, 0))[1] == 64 * 32 * 4)
+t.check('header_did_not_load', not header_png.has_data and not header_jpg.has_data)
+
+# ---- Catmull-Clark estimate follows the real polygon composition ----
+t.fresh_scene()
+triangle_mesh = bpy.data.meshes.new('Triangle')
+triangle_mesh.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [], [(0, 1, 2)])
+triangle = bpy.data.objects.new('Triangle', triangle_mesh)
+bpy.context.collection.objects.link(triangle)
+sub_one = triangle.modifiers.new('Sub', 'SUBSURF')
+sub_one.levels, sub_one.render_levels = 0, 1
+bpy.context.view_layer.update()
+counter = weight.WeightCounter(bpy.context)
+t.check('subsurf_triangle_level1', counter.object_triangles(triangle)[0] == 6,
+        counter.object_triangles(triangle))
+sub_one.render_levels = 2
+counter = weight.WeightCounter(bpy.context)
+t.check('subsurf_triangle_level2', counter.object_triangles(triangle)[0] == 24,
+        counter.object_triangles(triangle))
+
+bpy.ops.mesh.primitive_uv_sphere_add(segments=64, ring_count=32, radius=0.1, location=(5, 0, 0))
+soup = bpy.context.active_object
+soup.name = 'TriangleSoup'
+import bmesh  # noqa: E402
+bm = bmesh.new()
+bm.from_mesh(soup.data)
+bmesh.ops.triangulate(bm, faces=list(bm.faces))
+bm.to_mesh(soup.data)
+bm.free()
+soup_faces = len(soup.data.polygons)                     # 3968 triangles
+soup.modifiers.new('Sub', 'SUBSURF').render_levels = 2   # 3 x 3968 x 4 = 47616 quads
+bpy.context.view_layer.update()
+counter = weight.WeightCounter(bpy.context)
+t.check('subsurf_soup_estimate', counter.object_triangles(soup)[0] == 2 * 3 * soup_faces * 4,
+        counter.object_triangles(soup))
+heavy = weight.heavy_subdivisions([soup], max_faces=40000)
+t.check('heavy_uses_real_estimate', heavy and heavy[0][2] == 3 * soup_faces * 4, heavy)
+t.check('heavy_not_flagged_under_limit', not weight.heavy_subdivisions([soup]))
+soup.modifiers['Sub'].levels = 2                         # evaluate it for real
+bpy.context.view_layer.update()
+evaluated = soup.evaluated_get(bpy.context.evaluated_depsgraph_get())
+t.check('subsurf_estimate_matches_blender', len(evaluated.data.polygons) == 3 * soup_faces * 4,
+        len(evaluated.data.polygons))
+
 # ---- scene weight ----
 scene = t.fresh_scene()
 bpy.ops.mesh.primitive_cube_add()                       # 12 tris
