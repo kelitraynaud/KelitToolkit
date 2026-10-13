@@ -55,6 +55,39 @@ The **Content Folder** is just the storage address. Keep one fixed folder
 per Unreal project: changing it between two syncs of the same .blend leaves
 the plugin looking in the new place while the old assets stay in the old one.
 
+## Optimize AI Meshes
+
+In **Prepare Assets > Mesh**, **Optimize AI Meshes** adds a reversible
+`KT_Optimize` Decimate modifier. This is a lossy reduction: retaining a UV layer
+does not guarantee identical textures, shading or silhouette. Compare at the
+final camera distance before using **Apply**.
+
+- **Selected Only** affects only the selected eligible objects. **Entire Scene**
+  affects eligible objects in that scene. **Include Linked Instances Outside
+  Scope** explicitly expands this to other objects sharing the mesh data.
+  Excluded references, linked assets, rigged meshes, and incompatible modifier
+  stacks are skipped. A second Decimate is never stacked automatically.
+- **Minimum Retained Ratio** defaults to 50%. This limit overrides the face
+  budget; it is a conservative starting point, not a quality guarantee. Lower
+  it explicitly for more reduction. Surface budgets use scene units and the
+  largest targeted instance, including nonuniform scaling.
+- **Mark as Hero** sets a per-object minimum. It affects the selection unless
+  **Include Linked Instances** is enabled. Run Optimize again to update the
+  modifiers. At 100%, an existing optimization modifier is removed. This
+  restores the base mesh, not detail already removed with destructive Apply.
+- **Keep Original Reference** creates an independent excluded copy in
+  `KT_Optimize_References`, hidden in the viewport and render. It is retained
+  across repeated optimizations. For comparison, hide the optimized object and
+  enable the matching reference's viewport/render visibility. Its name is stored
+  in the optimized object's `kt_optimize_reference` custom property.
+- **Protect UV Island Borders** pins boundary vertices. It can still produce
+  shading or texture artifacts, especially at low budgets. When only some linked
+  users are targeted, their mesh data is copied so vertex weights cannot change
+  objects outside the scope.
+- The dialog shows an **estimate**. The execution report counts evaluated faces
+  and checks whether UV layers are present. **Remove KT_Optimize** removes only
+  the modifiers; after destructive Apply, use Undo or the saved reference.
+
 ## USD Scene Sync
 
 Objects disabled for **render** (camera toggle) are skipped. Objects merely

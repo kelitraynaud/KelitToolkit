@@ -1,8 +1,6 @@
 """Optimize AI Meshes: batch decimation of AI-generated props (Meshy, Tripo,
-Hunyuan...). Those meshes are triangle soups far denser than their size
-needs (a 14 cm can with 548k faces) while their UV-mapped textures carry
-the detail, so a Collapse decimation to a budget proportional to the surface
-keeps the look and the textures.
+Hunyuan...). UV layers are retained, but mapping, normals and silhouettes can
+change. Compare from the final camera before applying a face budget.
 
 Remeshing is deliberately not offered: on folded cloth with close layers and
 a non-manifold source, it opened holes (63 to 1951 open edges in a test)."""
@@ -18,6 +16,7 @@ MODIFIER_NAME = "KT_Optimize"
 SEAM_GROUP = "KT_UVSeams"
 EXCLUDE_PROPERTY = "kt_optimize_exclude"
 HERO_PROPERTY = "kt_optimize_min_ratio"
+REFERENCE_PROPERTY = "kt_optimize_reference"
 DEFORMING = {'ARMATURE', 'LATTICE', 'CURVE', 'HOOK', 'MESH_DEFORM', 'SURFACE_DEFORM',
              'CAST', 'SIMPLE_DEFORM', 'WARP', 'WAVE', 'LAPLACIANDEFORM', 'CORRECTIVE_SMOOTH'}
 
@@ -35,13 +34,6 @@ def mesh_stats(mesh):
     return count, float((totals == 3).mean()), float(areas.sum())
 
 
-def area_scale(obj):
-    """Factor turning a mesh-space area into a world-space one (mean of the
-    three face orientations' scale products)."""
-    sx, sy, sz = (abs(v) for v in obj.matrix_world.to_scale())
-    return (sx * sy + sy * sz + sx * sz) / 3.0
-
-
 def skip_reason(obj):
     if obj.library is not None or obj.data.library is not None:
         return "linked"
@@ -53,33 +45,73 @@ def skip_reason(obj):
         if any(m.type == 'ARMATURE' for m in obj.modifiers) or obj.parent_type == 'ARMATURE':
             return "armature"
     for modifier in obj.modifiers:
+        if modifier.name == MODIFIER_NAME:
+            if modifier.type != 'DECIMATE':
+                return "KT_Optimize name used by another modifier"
+            continue
+        if modifier.type == 'DECIMATE':
+            return "another Decimate modifier"
         if modifier.type in DEFORMING:
             return "armature" if modifier.type == 'ARMATURE' else "deforming modifier"
+        if modifier.show_viewport or modifier.show_render:
+            return "other active modifier (preview/apply would differ)"
     return None
 
 
+def world_surface_area(mesh, obj, unit_scale=1.0, local_area=None):
+    """Area including nonuniform scale, parents and scene units."""
+    import numpy as np
+    matrix = np.array(obj.matrix_world.to_3x3())
+    gram = matrix.T @ matrix
+    scale_squared = float(np.trace(gram) / 3.0)
+    if np.allclose(gram, np.eye(3) * scale_squared, rtol=1e-6,
+                   atol=max(scale_squared, 1e-30) * 1e-6):
+        # Common instance case: avoid re-triangulating a large mesh per user.
+        if local_area is None:
+            local_area = mesh_stats(mesh)[2]
+        return local_area * scale_squared * unit_scale ** 2
+    mesh.calc_loop_triangles()
+    vertices = np.empty(len(mesh.vertices) * 3, dtype=np.float64)
+    mesh.vertices.foreach_get('co', vertices)
+    vertices = vertices.reshape((-1, 3)) @ matrix.T
+    triangles = np.empty(len(mesh.loop_triangles) * 3, dtype=np.int32)
+    mesh.loop_triangles.foreach_get('vertices', triangles)
+    points = vertices[triangles.reshape((-1, 3))]
+    return float(np.linalg.norm(np.cross(points[:, 1] - points[:, 0],
+                                        points[:, 2] - points[:, 0]), axis=1).sum() * 0.5
+                 * unit_scale ** 2)
+
+
 def find_candidates(objects, settings):
-    """One entry per unique mesh data worth decimating, with its plan."""
+    """One plan per mesh, using only eligible objects in the chosen scope."""
     seen = {}
     skipped = {}
-    for obj in objects:
+    pool = {obj.as_pointer(): obj for obj in objects if obj.type == 'MESH'}
+    if settings.get('include_instances', False):
+        for obj in list(pool.values()):
+            for user in mesh_users(obj.data):
+                pool[user.as_pointer()] = user
+    eligible = {}
+    for obj in pool.values():
+        reason = skip_reason(obj)
+        if reason:
+            skipped[obj.name_full] = reason
+        else:
+            eligible.setdefault(obj.data.name_full, []).append(obj)
+    for users in eligible.values():
+        obj = users[0]
         if obj.type != 'MESH' or obj.data is None:
             continue
         mesh = obj.data
-        if mesh.name_full in seen or mesh.name_full in skipped:
-            continue
-        users = mesh_users(mesh)
-        reasons = [r for r in (skip_reason(user) for user in users) if r]
-        if reasons:
-            skipped[mesh.name_full] = reasons[0]
-            continue
         faces, tri_share, area = mesh_stats(mesh)
         if faces == 0:
             continue
-        world_area = area * area_scale(users[0])
+        world_area = max(world_surface_area(mesh, user, settings.get('unit_scale', 1.0), area)
+                         for user in users)
         density = faces / world_area if world_area > 1e-9 else float('inf')
         dense = tri_share >= settings['min_tri_share'] and density >= settings['density']
-        if not (dense or faces >= settings['max_faces_absolute']):
+        existing = any(user.modifiers.get(MODIFIER_NAME) for user in users)
+        if not (dense or faces >= settings['max_faces_absolute'] or existing):
             continue
         target = world_area * settings['budget']
         target = max(settings['min_faces'], min(settings['max_faces'], target))
@@ -89,8 +121,8 @@ def find_candidates(objects, settings):
         hero = max((float(user.get(HERO_PROPERTY, 0.0) or 0.0) for user in users), default=0.0)
         hero = max(0.0, min(1.0, hero))
         auto_ratio = ratio
-        ratio = max(ratio, hero)
-        if ratio >= 0.95:
+        ratio = max(ratio, hero, settings.get('min_ratio', 0.5))
+        if ratio >= 0.95 and not existing and hero < 0.95:
             continue
         seen[mesh.name_full] = {'mesh': mesh, 'users': users, 'faces': faces,
                                 'tri_share': tri_share, 'area': world_area,
@@ -141,10 +173,51 @@ def protect_seams(plan):
     return True
 
 
+def isolate_seam_data(plan):
+    """Weights are shared mesh data: keep out-of-scope users untouched."""
+    targets = {o.as_pointer() for o in plan['users']}
+    if any(o.as_pointer() not in targets for o in mesh_users(plan['mesh'])):
+        plan['mesh'] = plan['mesh'].copy()
+        for obj in plan['users']:
+            obj.data = plan['mesh']
+
+
+def ensure_reference(context, plan):
+    """Independent, excluded reference before the first optimization."""
+    for obj in plan['users']:
+        reference = bpy.data.objects.get(obj.get(REFERENCE_PROPERTY, ''))
+        if reference is not None and reference.get(EXCLUDE_PROPERTY):
+            return reference
+    collection = bpy.data.collections.get('KT_Optimize_References')
+    if collection is None:
+        collection = bpy.data.collections.new('KT_Optimize_References')
+        context.scene.collection.children.link(collection)
+    source = plan['users'][0]
+    reference = source.copy()
+    reference.data = plan['mesh'].copy()
+    reference.name = source.name + '_KT_Original'
+    reference.modifiers.clear()
+    reference[EXCLUDE_PROPERTY] = True
+    reference.hide_render = True
+    reference.hide_viewport = True
+    collection.objects.link(reference)
+    for obj in plan['users']:
+        obj[REFERENCE_PROPERTY] = reference.name
+    return reference
+
+
+def evaluated_stats(context, obj):
+    context.view_layer.update()
+    evaluated = obj.evaluated_get(context.evaluated_depsgraph_get())
+    return len(evaluated.data.polygons), bool(evaluated.data.uv_layers)
+
+
 def add_modifier(obj, ratio, protected):
     modifier = obj.modifiers.get(MODIFIER_NAME)
     if modifier is None:
         modifier = obj.modifiers.new(MODIFIER_NAME, 'DECIMATE')
+    elif modifier.type != 'DECIMATE':
+        raise ValueError('KT_Optimize is not a Decimate modifier')
     modifier.decimate_type = 'COLLAPSE'
     modifier.ratio = ratio
     modifier.use_collapse_triangulate = True
@@ -167,8 +240,9 @@ def apply_plan(context, plan, protected):
     temp = bpy.data.objects.new("KT_OptimizeTemp", mesh)
     context.scene.collection.objects.link(temp)
     try:
-        if protected:
-            temp.vertex_groups.new(name=SEAM_GROUP)
+        for group in plan['users'][0].vertex_groups:
+            if temp.vertex_groups.get(group.name) is None:
+                temp.vertex_groups.new(name=group.name)
         add_modifier(temp, plan['ratio'], protected)
         depsgraph = context.evaluated_depsgraph_get()
         evaluated = temp.evaluated_get(depsgraph)
@@ -193,13 +267,18 @@ def apply_plan(context, plan, protected):
 
 def remove_optimization(objects):
     removed = 0
+    objects = list(objects)
     for obj in objects:
         modifier = obj.modifiers.get(MODIFIER_NAME) if obj.type == 'MESH' else None
-        if modifier is not None:
+        if modifier is not None and modifier.type == 'DECIMATE':
             obj.modifiers.remove(modifier)
             removed += 1
+    for obj in objects:
         group = obj.vertex_groups.get(SEAM_GROUP) if obj.type == 'MESH' else None
-        if group is not None:
+        in_use = obj.type == 'MESH' and any(
+            getattr(modifier, 'vertex_group', '') == SEAM_GROUP
+            for user in mesh_users(obj.data) for modifier in user.modifiers)
+        if group is not None and not in_use:
             obj.vertex_groups.remove(group)
     return removed
 
@@ -211,8 +290,8 @@ def _faces(value):
 class OBJECT_OT_optimize_ai_meshes(bpy.types.Operator):
     """Decimate AI-generated props (Meshy, Tripo, Hunyuan...): dense triangle
     soups get a Collapse decimation to a face budget proportional to their
-    surface, textures and UVs kept. Non-destructive by default (a KT_Optimize
-    modifier on each object); each shared mesh is handled once"""
+    surface. UV layers remain but visual detail can change: compare at the
+    final camera distance. Non-destructive by default"""
     bl_idname = "kelit_toolkit.optimize_ai_meshes"
     bl_label = "Optimize AI Meshes"
     bl_options = {'REGISTER', 'UNDO'}
@@ -236,15 +315,24 @@ class OBJECT_OT_optimize_ai_meshes(bpy.types.Operator):
         default=5000.0, min=10.0)
     min_faces: bpy.props.IntProperty(name="Min Faces", default=2000, min=10)
     max_faces: bpy.props.IntProperty(name="Max Faces", default=60000, min=100)
+    min_ratio: bpy.props.FloatProperty(
+        name="Minimum Retained Ratio", default=0.5, min=0.01, max=1.0, subtype='FACTOR',
+        description="Overrides the face budget to limit reduction. Not a visual quality guarantee")
+    include_instances: bpy.props.BoolProperty(
+        name="Include Linked Instances Outside Scope", default=False,
+        description="Also treat eligible objects sharing mesh data, including other scenes")
+    create_reference: bpy.props.BoolProperty(
+        name="Keep Original Reference", default=True,
+        description="Create an independent excluded copy, hidden in viewport and render")
     apply: bpy.props.BoolProperty(
         name="Apply (destructive)",
         description="Bake the decimation into the mesh data instead of adding a modifier. "
-                    "Instances keep sharing one mesh",
+                    "Only targeted instances receive the result; other users keep their original mesh",
         default=False)
     protect_uv_seams: bpy.props.BoolProperty(
         name="Protect UV Island Borders",
         description="Keep the vertices on UV island borders out of the decimation, "
-                    "to avoid texture smearing along seams (keeps more faces)",
+                    "May still change shading and textures. May copy mesh data to protect other instances",
         default=False)
 
     @classmethod
@@ -255,10 +343,12 @@ class OBJECT_OT_optimize_ai_meshes(bpy.types.Operator):
         pool = context.selected_objects if self.scope == 'SELECTED' else context.scene.objects
         return [obj for obj in pool if obj.type == 'MESH']
 
-    def _settings(self):
+    def _settings(self, context=None):
         return {'min_tri_share': self.min_tri_share, 'density': self.density,
                 'max_faces_absolute': self.max_faces_absolute, 'budget': self.budget,
-                'min_faces': self.min_faces, 'max_faces': max(self.max_faces, self.min_faces)}
+                'min_faces': self.min_faces, 'max_faces': max(self.max_faces, self.min_faces),
+                'min_ratio': self.min_ratio, 'include_instances': self.include_instances,
+                'unit_scale': context.scene.unit_settings.scale_length if context else 1.0}
 
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self, width=460)
@@ -266,6 +356,7 @@ class OBJECT_OT_optimize_ai_meshes(bpy.types.Operator):
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "scope")
+        layout.prop(self, "include_instances")
         col = layout.column(align=True)
         col.prop(self, "min_tri_share")
         col.prop(self, "density")
@@ -275,31 +366,47 @@ class OBJECT_OT_optimize_ai_meshes(bpy.types.Operator):
         row = col.row(align=True)
         row.prop(self, "min_faces")
         row.prop(self, "max_faces")
+        col.prop(self, "min_ratio")
         layout.prop(self, "protect_uv_seams")
+        layout.prop(self, "create_reference")
         layout.prop(self, "apply")
-        plans, skipped = find_candidates(self._objects(context), self._settings())
+        layout.label(text="Lossy reduction: compare from the final camera before Apply.", icon='ERROR')
+        plans, skipped = find_candidates(self._objects(context), self._settings(context))
         objects = sum(len(p['users']) for p in plans)
         before = sum(p['faces'] for p in plans)
         after = sum(p['target'] for p in plans)
         box = layout.box()
-        box.label(text=f"{objects} object(s) / {len(plans)} unique mesh(es): "
+        box.label(text=f"Estimate: {objects} object(s) / {len(plans)} unique mesh(es): "
                        f"{_faces(before)} to {_faces(after)} faces", icon='INFO')
         for plan in sorted(plans, key=lambda p: p['faces'], reverse=True)[:6]:
             box.label(text=f"  {plan['mesh'].name}: {_faces(plan['faces'])} to "
                            f"{_faces(plan['target'])} ({len(plan['users'])} user(s))")
         if skipped:
-            box.label(text=f"{len(skipped)} mesh(es) skipped (armature, shape keys, linked...)")
+            box.label(text=f"{len(skipped)} object(s) skipped")
+            for name, reason in list(skipped.items())[:3]:
+                box.label(text=f"  {name}: {reason}")
 
     def execute(self, context):
-        plans, skipped = find_candidates(self._objects(context), self._settings())
+        plans, skipped = find_candidates(self._objects(context), self._settings(context))
         if not plans:
-            self.report({'INFO'}, "No AI-like dense mesh found with these settings")
+            message = "; ".join(f"{name}: {reason}" for name, reason in list(skipped.items())[:3])
+            self.report({'WARNING'} if skipped else {'INFO'}, message or "No dense mesh found with these settings")
             return {'CANCELLED'}
         restore = viewports_to_solid(context) if self.apply else (lambda: None)
         lines = []
         unprotected = []
         try:
             for plan in sorted(plans, key=lambda p: p['faces'], reverse=True):
+                if self.create_reference:
+                    ensure_reference(context, plan)
+                if plan['ratio'] >= 1.0:
+                    remove_optimization(plan['users'])
+                    plan['result'] = plan['faces']
+                    lines.append(('INFO', f"{plan['mesh'].name}: base mesh restored (100%)",
+                                  plan['users'][0].name))
+                    continue
+                if self.protect_uv_seams:
+                    isolate_seam_data(plan)
                 protected = self.protect_uv_seams and protect_seams(plan)
                 if self.protect_uv_seams and not protected:
                     unprotected.append(plan['mesh'].name)
@@ -312,15 +419,14 @@ class OBJECT_OT_optimize_ai_meshes(bpy.types.Operator):
                     name = plan['mesh'].name
                     for user in plan['users']:
                         add_modifier(user, plan['ratio'], protected)
-                    result = plan['target']
-                    uv_ok = True
+                    result, uv_ok = evaluated_stats(context, plan['users'][0])
                 plan['result'] = result
                 lines.append(('INFO',
                               f"{name}: {plan['faces']:,} to {result:,} faces, ratio "
                               f"{plan['ratio']:.3f}, {len(plan['users'])} user(s)"
                               + (f", hero minimum {plan['hero']:.2f} (auto {plan['auto_ratio']:.3f})"
                                  if plan['hero'] else "")
-                              + ("" if uv_ok else "  NO UV AFTER APPLY"),
+                              + ("" if uv_ok else "  NO UV LAYER"),
                               plan['users'][0].name))
         finally:
             restore()
@@ -335,6 +441,8 @@ class OBJECT_OT_optimize_ai_meshes(bpy.types.Operator):
         if unprotected:
             header.append(('WARNING', "UV borders not protected (vertex groups differ between "
                                       "users): " + ", ".join(unprotected[:5])))
+        header.append(('WARNING', "UV layers retained does not mean identical textures or shading. "
+                                  "Compare the original at the final camera distance before Apply."))
         from .scene_weight import heavy_subdivisions
         for name, base, evaluated, size in heavy_subdivisions(self._objects(context)):
             header.append(('WARNING', f"Heavy subdivision on {name}: {base:,} to {evaluated:,} faces "
@@ -349,8 +457,8 @@ class OBJECT_OT_optimize_ai_meshes(bpy.types.Operator):
 
 
 class OBJECT_OT_remove_ai_optimize(bpy.types.Operator):
-    """Remove the KT_Optimize modifiers (and the UV border vertex groups)
-    added by Optimize AI Meshes: back to the original meshes"""
+    """Remove KT_Optimize modifiers and unused UV protection groups.
+    Destructive Apply cannot be undone here: use Undo or the saved reference"""
     bl_idname = "kelit_toolkit.remove_ai_optimize"
     bl_label = "Remove KT_Optimize"
     bl_options = {'REGISTER', 'UNDO'}
@@ -370,7 +478,8 @@ class OBJECT_OT_remove_ai_optimize(bpy.types.Operator):
 class OBJECT_OT_mark_ai_hero(bpy.types.Operator):
     """Give the selected objects a minimum decimation ratio for Optimize AI
     Meshes (objects seen up close: a low ratio damages UV seams). Every
-    object sharing the mesh gets it too. Ratio 0 removes the mark"""
+    object in the selection gets it. Ratio 0 removes the mark, 1 restores the
+    undecimated mesh when Optimize AI Meshes is run again"""
     bl_idname = "kelit_toolkit.mark_ai_hero"
     bl_label = "Mark as Hero"
     bl_options = {'REGISTER', 'UNDO'}
@@ -378,7 +487,10 @@ class OBJECT_OT_mark_ai_hero(bpy.types.Operator):
     min_ratio: bpy.props.FloatProperty(
         name="Minimum Ratio", description="Never decimate these meshes below this ratio "
                                           "(0 removes the mark)",
-        default=0.2, min=0.0, max=1.0, subtype='FACTOR')
+        default=0.5, min=0.0, max=1.0, subtype='FACTOR')
+    include_instances: bpy.props.BoolProperty(
+        name="Include Linked Instances", default=False,
+        description="Also mark eligible objects sharing the selected mesh data")
 
     @classmethod
     def poll(cls, context):
@@ -392,8 +504,8 @@ class OBJECT_OT_mark_ai_hero(bpy.types.Operator):
         for obj in context.selected_objects:
             if obj.type != 'MESH' or obj.data is None:
                 continue
-            for user in mesh_users(obj.data):
-                if user.library is not None:
+            for user in mesh_users(obj.data) if self.include_instances else [obj]:
+                if user.library is not None or user.get(EXCLUDE_PROPERTY):
                     continue
                 if self.min_ratio > 0:
                     user[HERO_PROPERTY] = self.min_ratio

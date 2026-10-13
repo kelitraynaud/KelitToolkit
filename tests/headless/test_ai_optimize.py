@@ -46,7 +46,7 @@ faces_before = {o.name: len(o.data.polygons) for o in (dense, shared_src, light,
 uv_before = len(dense.data.uv_layers)
 ai = t.submodule('operators.ai_optimize')
 probe = {'min_tri_share': 0.9, 'density': 20000.0, 'max_faces_absolute': 100000,
-         'budget': 5000.0, 'min_faces': 2000, 'max_faces': 60000}
+         'budget': 5000.0, 'min_faces': 2000, 'max_faces': 60000, 'min_ratio': 0.01}
 plans, skipped = ai.find_candidates(list(scene.objects), probe)
 names = {p['mesh'].name: p for p in plans}
 t.check('detects_dense_and_shared_once', sorted(names) == ['Can', 'Parasol'], sorted(names))
@@ -58,7 +58,7 @@ t.check('light_ignored', 'LightQuads' not in names)
 
 # non-destructive pass, then revert
 bpy.ops.object.select_all(action='SELECT')
-bpy.ops.kelit_toolkit.optimize_ai_meshes('EXEC_DEFAULT', scope='SCENE')
+bpy.ops.kelit_toolkit.optimize_ai_meshes('EXEC_DEFAULT', scope='SCENE', min_ratio=0.01, create_reference=False)
 with_mod = [o.name for o in scene.objects if o.modifiers.get('KT_Optimize')]
 t.check('modifiers_on_all_users', sorted(with_mod) == sorted(['Can'] + [o.name for o in shared]),
         with_mod)
@@ -71,7 +71,7 @@ t.check('revert_clean', not any(o.modifiers.get('KT_Optimize') for o in scene.ob
         and len(dense.data.polygons) == faces_before['Can'])
 
 # destructive pass
-bpy.ops.kelit_toolkit.optimize_ai_meshes('EXEC_DEFAULT', scope='SCENE', apply=True,
+bpy.ops.kelit_toolkit.optimize_ai_meshes('EXEC_DEFAULT', scope='SCENE', apply=True, min_ratio=0.01, create_reference=False,
                                          protect_uv_seams=True)
 t.check('apply_reduces', len(dense.data.polygons) < faces_before['Can'] * 0.5,
         len(dense.data.polygons))
@@ -93,7 +93,7 @@ bpy.context.collection.objects.link(mate)
 t.deselect_all()
 hero.select_set(True)
 bpy.context.view_layer.objects.active = hero
-bpy.ops.kelit_toolkit.mark_ai_hero('EXEC_DEFAULT', min_ratio=0.2)
+bpy.ops.kelit_toolkit.mark_ai_hero('EXEC_DEFAULT', min_ratio=0.2, include_instances=True)
 t.check('hero_marked_on_all_users', abs(hero.get('kt_optimize_min_ratio', 0) - 0.2) < 1e-6
         and abs(mate.get('kt_optimize_min_ratio', 0) - 0.2) < 1e-6)
 plans, _skipped = ai.find_candidates(list(scene.objects), probe)
@@ -101,10 +101,10 @@ plan = plans[0] if plans else {}
 t.check('hero_ratio_respected', abs(plan.get('ratio', 0) - 0.2) < 1e-6
         and plan.get('auto_ratio', 1) < 0.2 and abs(plan.get('hero', 0) - 0.2) < 1e-6,
         plan.get('ratio'))
-bpy.ops.kelit_toolkit.optimize_ai_meshes('EXEC_DEFAULT', scope='SCENE')
+bpy.ops.kelit_toolkit.optimize_ai_meshes('EXEC_DEFAULT', scope='SCENE', min_ratio=0.01, create_reference=False)
 lines = [line.text for line in bpy.context.window_manager.kelit_report_lines]
 t.check('hero_in_report', any('hero minimum 0.20' in text for text in lines), lines[:4])
-bpy.ops.kelit_toolkit.mark_ai_hero('EXEC_DEFAULT', min_ratio=0.0)
+bpy.ops.kelit_toolkit.mark_ai_hero('EXEC_DEFAULT', min_ratio=0.0, include_instances=True)
 t.check('hero_unmarked', 'kt_optimize_min_ratio' not in hero and 'kt_optimize_min_ratio' not in mate)
 
 bpy.ops.mesh.primitive_uv_sphere_add(segments=32, ring_count=16, radius=0.1, location=(3, 0, 0))
