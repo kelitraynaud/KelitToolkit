@@ -18,6 +18,7 @@ from . import scene_weight
 from . import ai_optimize
 from . import split_merge
 from . import auto_clean
+from . import auto_align
 
 
 def register():
@@ -26,6 +27,7 @@ def register():
     ai_optimize.register()
     split_merge.register()
     auto_clean.register()
+    auto_align.register()
     instances.register()
     origin.register()
     naming.register()
@@ -55,6 +57,7 @@ def unregister():
     naming.unregister()
     origin.unregister()
     instances.unregister()
+    auto_align.unregister()
     auto_clean.unregister()
     split_merge.unregister()
     ai_optimize.unregister()

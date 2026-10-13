@@ -16,7 +16,9 @@ import bmesh
 import bpy
 import mathutils
 
-from ..utils import clean_name, mesh_users
+from ..utils import (ROTATION_MIN_CONFIDENCE, canonical_frames, clean_name,
+                     find_rigid_match, mesh_users, natural_axes, numpy_to_matrix3,
+                     rigid_match_tolerance, shape_invariant_key)
 
 
 # ============================================================================
@@ -284,9 +286,119 @@ def cluster_signature(bm, verts):
     return unit_signatures(bm, [verts])[0]
 
 
-def analyse_repeats(obj, min_vertices, min_repeats, tolerance_ratio):
-    """Units of `obj` that repeat: list of (signature, [(verts, centroid), ...])
-    plus the number of units found. Read-only."""
+def _unit_records(bm, units):
+    """Surface of each unit for the rotation-aware comparison: vertex
+    positions (numpy, in the unit's vertex order), face normals, areas and
+    centers, faces as (sorted local vertex indices, material) and loops as
+    (local vertex index, u, v). One pass over the faces."""
+    import numpy as np
+    local = {}
+    for number, verts in enumerate(units):
+        for position, vertex in enumerate(verts):
+            local[vertex.index] = (number, position)
+    records = [{'points': np.array([tuple(v.co) for v in verts], dtype=float).reshape(-1, 3),
+                'normals': [], 'areas': [], 'centers': [], 'faces': [], 'loops': []}
+               for verts in units]
+    uv_layer = bm.loops.layers.uv.active
+    for face in bm.faces:
+        entry = local.get(face.verts[0].index)
+        if entry is None:
+            continue
+        record = records[entry[0]]
+        record['normals'].append(tuple(face.normal))
+        record['areas'].append(face.calc_area())
+        record['centers'].append(tuple(face.calc_center_median()))
+        record['faces'].append((tuple(sorted(local[v.index][1] for v in face.verts)),
+                                face.material_index))
+        if uv_layer is not None:
+            for loop in face.loops:
+                uv = loop[uv_layer].uv
+                record['loops'].append((local[loop.vert.index][1], round(uv.x, 4), round(uv.y, 4)))
+    for record in records:
+        record['faces'].sort()
+        record['loops'].sort()
+    return records
+
+
+def _merge_rotated_units(bm, groups):
+    """Merge the groups of `groups` (list of (signature, [(verts, centroid,
+    rotation)])) whose units are the same element turned: same canonical
+    signature (or coarse invariant key when the exact one missed on a
+    rounding boundary), same materials and UVs, verified vertex by vertex
+    with the faces' materials and every loop's UV following the vertices."""
+    if len(groups) < 2:
+        return groups
+    bm.normal_update()
+    records = _unit_records(bm, [items[0][0] for _signature, items in groups])
+    for record in records:
+        points = record['points']
+        frame, confidence, _method = natural_axes(points, record['normals'], record['areas'],
+                                                  record['centers'])
+        if confidence < ROTATION_MIN_CONFIDENCE:
+            record['keys'] = None
+            continue
+        canonical, rotations, centroid = canonical_frames(points, frame)
+        surfacing = (tuple(sorted(material for _face, material in record['faces'])),
+                     tuple(sorted((u, v) for _index, u, v in record['loops'])))
+        record['keys'] = ((len(points), 'exact', canonical) + surfacing,
+                          (len(points), 'coarse', shape_invariant_key(points)) + surfacing)
+        record['rotation'] = rotations[0]
+        record['centroid'] = centroid
+        record['tolerance'] = rigid_match_tolerance(points)
+
+    def surfacing_follows(source, target):
+        def accept(mapping):
+            faces = sorted((tuple(sorted(mapping[i] for i in face)), material)
+                           for face, material in source['faces'])
+            if faces != target['faces']:
+                return False
+            loops = sorted((mapping[i], u, v) for i, u, v in source['loops'])
+            return loops == target['loops']
+        return accept
+
+    merged_into = list(range(len(groups)))
+    relative = {}
+    for key_index in (0, 1):
+        buckets = defaultdict(list)
+        for index, record in enumerate(records):
+            if record['keys'] is not None and merged_into[index] == index:
+                buckets[record['keys'][key_index]].append(index)
+        for members in buckets.values():
+            masters = []
+            for index in members:
+                record = records[index]
+                for master in masters:
+                    source = records[master]
+                    rotation, _mapping = find_rigid_match(
+                        source['points'], record['points'], source['rotation'],
+                        record['rotation'], source['centroid'], record['centroid'],
+                        max(source['tolerance'], record['tolerance']), same_order=False,
+                        accept=surfacing_follows(source, record))
+                    if rotation is not None:
+                        merged_into[index] = master
+                        relative[index] = rotation
+                        break
+                else:
+                    masters.append(index)
+    result = []
+    for index, (signature, items) in enumerate(groups):
+        if merged_into[index] != index:
+            continue
+        members = list(items)
+        for other, target in enumerate(merged_into):
+            if target == index and other != index:
+                rotation = numpy_to_matrix3(relative[other])
+                members.extend((verts, centroid, rotation)
+                               for verts, centroid, _identity in groups[other][1])
+        result.append((signature, members))
+    return result
+
+
+def analyse_repeats(obj, min_vertices, min_repeats, tolerance_ratio, rotated=True):
+    """Units of `obj` that repeat: list of (signature, [(verts, centroid,
+    rotation), ...]) plus the number of units found. With `rotated`, units
+    equal up to a rotation are one element (rotation relative to the first
+    item, identity otherwise). Read-only."""
     bm = bmesh.new()
     bm.from_mesh(obj.data)
     bm.verts.ensure_lookup_table()
@@ -298,9 +410,13 @@ def analyse_repeats(obj, min_vertices, min_repeats, tolerance_ratio):
     units = cluster_parts(parts, tolerance)
     groups = defaultdict(list)
     candidates = [verts for verts in units if len(verts) >= min_vertices]
+    identity = mathutils.Matrix.Identity(3)
     for verts, (signature, centroid) in zip(candidates, unit_signatures(bm, candidates)):
-        groups[signature].append((verts, centroid))
-    repeated = [(signature, items) for signature, items in groups.items()
+        groups[signature].append((verts, centroid, identity))
+    grouped = list(groups.items())
+    if rotated:
+        grouped = _merge_rotated_units(bm, grouped)
+    repeated = [(signature, items) for signature, items in grouped
                 if len(items) >= min_repeats]
     return repeated, len(units), bm
 
@@ -343,6 +459,12 @@ class OBJECT_OT_split_repeated_parts(bpy.types.Operator):
         description="Pieces closer than this fraction of the object's size are one element",
         default=0.005, min=0.0, max=0.1, precision=3
     )
+    rotated_copies: bpy.props.BoolProperty(
+        name="Rotated Copies",
+        description="Elements equal up to a rotation share one mesh, each instance "
+                    "turned like the element it replaces",
+        default=True
+    )
 
     @classmethod
     def poll(cls, context):
@@ -361,12 +483,13 @@ class OBJECT_OT_split_repeated_parts(bpy.types.Operator):
         layout.prop(self, "min_vertices")
         layout.prop(self, "min_repeats")
         layout.prop(self, "contact_tolerance")
+        layout.prop(self, "rotated_copies")
         box = layout.box()
         shown = 0
         total_instances = 0
         for obj in self._targets(context):
             repeated, units, bm = analyse_repeats(obj, self.min_vertices, self.min_repeats,
-                                                  self.contact_tolerance)
+                                                  self.contact_tolerance, self.rotated_copies)
             if bm is not None:
                 bm.free()
             if not repeated:
@@ -389,7 +512,7 @@ class OBJECT_OT_split_repeated_parts(bpy.types.Operator):
         touched = 0
         for obj in self._targets(context):
             repeated, _units, bm = analyse_repeats(obj, self.min_vertices, self.min_repeats,
-                                                   self.contact_tolerance)
+                                                   self.contact_tolerance, self.rotated_copies)
             if not repeated:
                 if bm is not None:
                     bm.free()
@@ -398,15 +521,17 @@ class OBJECT_OT_split_repeated_parts(bpy.types.Operator):
             extracted = set()
             for number, (_signature, items) in enumerate(repeated, start=1):
                 base_name = f"{clean_name(obj.name)}_Part{number:02d}"
-                first_verts, first_centroid = items[0]
+                first_verts, first_centroid, _first_rotation = items[0]
                 shared = extract_unit(bm, first_verts, first_centroid, obj.data, base_name)
-                for verts, centroid in items:
+                for verts, centroid, rotation in items:
                     instance = bpy.data.objects.new(base_name, shared)
                     for collection in obj.users_collection:
                         collection.objects.link(instance)
                     instance.parent = obj.parent
                     instance.matrix_parent_inverse = obj.matrix_parent_inverse.copy()
-                    instance.matrix_world = obj.matrix_world @ mathutils.Matrix.Translation(centroid)
+                    instance.matrix_world = (obj.matrix_world
+                                             @ mathutils.Matrix.Translation(centroid)
+                                             @ rotation.to_4x4())
                     extracted.update(v.index for v in verts)
                     created += 1
                 elements += 1
