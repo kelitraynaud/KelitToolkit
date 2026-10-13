@@ -56,6 +56,16 @@ def is_no_editor_error(message):
     return str(message or '').startswith(NO_EDITOR_MESSAGE[:30])
 
 
+def open_connection_doctor():
+    """Open the Connection Doctor dialog (no editor answered). Returns
+    False when it could not open (no window, e.g. in background mode)."""
+    try:
+        return 'CANCELLED' not in bpy.ops.kelit_toolkit.connection_doctor('INVOKE_DEFAULT')
+    except RuntimeError as error:
+        print(f"[KelitToolkit] could not open the Connection Doctor: {error}")
+        return False
+
+
 # ============================================================================
 # INTERCHANGE FIX HELPERS
 # ============================================================================
@@ -424,23 +434,57 @@ class UNREAL_OT_fix_interchange_permanent(bpy.types.Operator):
         return {'FINISHED'}
 
 
-_PROJECT_CHOICES = [('AUTO', 'Automatic (one editor only)', 'Refuse to guess when multiple editors are open')]
+AUTO_PROJECT_CHOICE = ('AUTO', 'Automatic (one editor only)',
+                       'Refuse to guess when multiple editors are open')
+
+# Blender keeps only pointers to the strings a dynamic enum callback
+# returns: they must stay alive for as long as the property can be drawn.
+# The list object is never replaced (only its content), and every tuple
+# ever handed out is also kept in _PROJECT_CHOICES_KEEPALIVE.
+_PROJECT_CHOICES = [AUTO_PROJECT_CHOICE]
+_PROJECT_CHOICES_KEEPALIVE = {}
+
+
+def update_project_choices(nodes):
+    """Refresh the Choose Project items in place from discovered editors.
+    Returns the project roots found."""
+    roots = []
+    items = [AUTO_PROJECT_CHOICE]
+    for node in nodes:
+        root = str(node.get('project_root') or '')
+        if not root or root in roots:
+            continue
+        roots.append(root)
+        name = str(node.get('project_name') or root)
+        items.append(_PROJECT_CHOICES_KEEPALIVE.setdefault((root, name), (root, name, root)))
+    _PROJECT_CHOICES[:] = items
+    return roots
+
+
+def project_choice_items(_self, _context):
+    return _PROJECT_CHOICES
 
 
 class UNREAL_OT_choose_project(bpy.types.Operator):
     """Choose which running Unreal project receives all toolkit commands"""
     bl_idname = 'kelit_toolkit.choose_unreal_project'
     bl_label = 'Choose Unreal Project'
-    destination: bpy.props.EnumProperty(name='Destination', items=lambda self, context: _PROJECT_CHOICES)
+    destination: bpy.props.EnumProperty(name='Destination', items=project_choice_items)
 
     def invoke(self, context, event):
         from . import ue_remote
-        global _PROJECT_CHOICES
-        nodes = ue_remote.find_editors(wait_seconds=0.8)
-        choices = {n['project_root']: (n['project_root'], n['project_name'], n['project_root']) for n in nodes}
-        _PROJECT_CHOICES = [('AUTO', 'Automatic (one editor only)', 'Refuse to guess when multiple editors are open')] + list(choices.values())
+        try:
+            nodes = ue_remote.find_editors()
+        except Exception as error:
+            self.report({'ERROR'}, f"Could not look for running Unreal editors: {error}. "
+                                   "Check the remote-execution ports in the add-on preferences")
+            return {'CANCELLED'}
+        roots = update_project_choices(nodes)
+        if not roots:
+            self.report({'WARNING'}, "No Unreal editor answered: open your project in Unreal "
+                                     "(remote execution on), then choose again")
         current = context.scene.kelit_toolkit_settings.ue_target_project
-        self.destination = current if current in choices else (next(iter(choices)) if len(choices) == 1 else 'AUTO')
+        self.destination = current if current in roots else (roots[0] if len(roots) == 1 else 'AUTO')
         return context.window_manager.invoke_props_dialog(self, width=500)
 
     def draw(self, context):

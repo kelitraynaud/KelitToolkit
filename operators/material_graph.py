@@ -8,6 +8,30 @@ import bpy
 IDENTITY = [1., 0., 0., 0., 1., 0.]
 
 
+def active_uv_name(mesh):
+    """The UV map a mesh renders with ('' when it has none)."""
+    layers = getattr(mesh, 'uv_layers', None)
+    if not layers:
+        return ''
+    active = next((u for u in layers if u.active_render), layers.active)
+    return active.name if active else ''
+
+
+def default_uv_names(tree):
+    """Render UV names of every mesh using the material that owns `tree`
+    (object-linked slots included). Empty set when nothing uses it."""
+    material = next((m for m in bpy.data.materials if m.node_tree == tree), None)
+    if material is None:
+        return set()
+    names = set()
+    for obj in bpy.data.objects:
+        if obj.type != 'MESH' or obj.data is None:
+            continue
+        if any(slot.material == material for slot in obj.material_slots):
+            names.add(active_uv_name(obj.data))
+    return names
+
+
 def uv_source(socket, depth=0):
     if depth > 12:
         return {'unsupported': 'UV chain is cyclic or too deep'}
@@ -18,7 +42,12 @@ def uv_source(socket, depth=0):
     if node.type == 'REROUTE':
         return uv_source(node.inputs[0], depth + 1)
     if node.type == 'UVMAP':
-        return {'map': node.uv_map, 'matrix': IDENTITY[:]}
+        # naming the map every user mesh renders with is the same as naming
+        # none: it must not count as a different mapping
+        name = node.uv_map
+        if name and default_uv_names(node.id_data) == {name}:
+            name = ''
+        return {'map': name, 'matrix': IDENTITY[:]}
     if node.type == 'TEX_COORD' and output.name == 'UV':
         return {'map': '', 'matrix': IDENTITY[:]}
     if node.type == 'MAPPING' and node.vector_type == 'POINT':
@@ -101,6 +130,49 @@ def material_uv_plan(record):
     return plan
 
 
+# channels the master reads as one value (the red channel of their map)
+SCALAR_CHANNELS = {'roughness', 'metallic', 'opacity'}
+
+
+def texture_extraction(key, data):
+    """How the texture of channel `key` must be written for the master:
+    True extracts the image's Alpha into a linear grayscale map, 'R'/'G'/'B'
+    unpacks one colour channel, False keeps the image as it is. The master
+    reads scalar maps through their red channel, so an Alpha output feeding
+    Roughness or Metallic exported as RGB would read the colour instead."""
+    channel = (data or {}).get('channel')
+    if key in SCALAR_CHANNELS and channel == 'Alpha':
+        return True
+    if channel in {'R', 'G', 'B'}:
+        return channel
+    return False
+
+
+def extraction_suffix(mode):
+    if mode is True:
+        return '_B2UE_AlphaMask'
+    return '_B2UE_' + mode if mode else ''
+
+
+def texture_collisions(records):
+    """Exported texture names (compared without case, as Unreal does) that
+    still point at more than one distinct image."""
+    from .usd_sync import image_identity, unreal_texture_name
+    owners = {}
+    for record in records.values():
+        for key, data in record.items():
+            if not isinstance(data, dict) or 'texture' not in data:
+                continue
+            image = bpy.data.images.get(data.get('image', ''))
+            base = unreal_texture_name(image) if image is not None else data['texture']
+            name = base + extraction_suffix(texture_extraction(key, data))
+            entry = owners.setdefault(name.casefold(), (name, set(), set()))
+            entry[1].add(image_identity(image) if image is not None else data.get('image', ''))
+            entry[2].add(data.get('image', ''))
+    return {name: sorted(images) for name, identities, images in owners.values()
+            if len(identities) > 1}
+
+
 def record_warnings(records):
     warnings = []
     names = {}
@@ -116,10 +188,14 @@ def record_warnings(records):
                 warnings.append(name + ' / ' + channel + ': ' + value['unsupported'])
             if isinstance(value, dict) and value.get('channel') in {'R', 'G', 'B'} and channel in {'base_color', 'emissive', 'normal'}:
                 warnings.append(name + ' / ' + channel + ': separated channels supported for scalar maps only')
+            if isinstance(value, dict) and value.get('channel') == 'Alpha' and channel in {'base_color', 'emissive', 'normal'}:
+                warnings.append(name + ' / ' + channel + ': an image Alpha output is supported for scalar maps only')
         try:
             material_uv_plan(record)
         except ValueError as error:
             warnings.append(name + ': ' + str(error))
+    for texture, images in sorted(texture_collisions(records).items()):
+        warnings.append('Texture names collide in Unreal: ' + texture + ' (' + ', '.join(images) + ')')
     return warnings
 
 
@@ -153,7 +229,11 @@ def temporary_material_uvs(objects):
     copies = []
     try:
         for obj in objects:
-            if obj.type != 'MESH' or not obj.data.uv_layers:
+            if obj.type != 'MESH' or obj.data is None or not obj.data.uv_layers:
+                continue
+            if obj.library is not None:
+                # a linked object cannot take a temporary mesh
+                print('[KelitToolkit] ' + obj.name + ': linked object, material UV mapping not baked')
                 continue
             material_plans = {i: plans[s.material.name] for i, s in enumerate(obj.material_slots)
                               if s.material and s.material.name in plans}
@@ -174,6 +254,18 @@ def temporary_material_uvs(objects):
             coords = np.empty(len(mesh.loops)*2, dtype=np.float32)
             active.data.foreach_get('uv', coords)
             coords = coords.reshape(-1, 2)
+            # material index of every loop, without a per-polygon Python loop
+            polygon_count = len(mesh.polygons)
+            material_index = np.empty(polygon_count, dtype=np.int32)
+            mesh.polygons.foreach_get('material_index', material_index)
+            loop_start = np.empty(polygon_count, dtype=np.int64)
+            mesh.polygons.foreach_get('loop_start', loop_start)
+            loop_total = np.empty(polygon_count, dtype=np.int64)
+            mesh.polygons.foreach_get('loop_total', loop_total)
+            loop_material = np.full(len(mesh.loops), -1, dtype=np.int32)
+            if polygon_count:
+                order = np.repeat(loop_start - np.cumsum(loop_total) + loop_total, loop_total) + np.arange(int(loop_total.sum()))
+                loop_material[order] = np.repeat(material_index, loop_total)
             for index, plan in material_plans.items():
                 source = original.uv_layers.get(plan['map']) if plan['map'] else active
                 if source is None:
@@ -182,13 +274,10 @@ def temporary_material_uvs(objects):
                 source.data.foreach_get('uv', values)
                 values = values.reshape(-1, 2)
                 a,b,x,d,e,y = plan['matrix']
-                for polygon in mesh.polygons:
-                    if polygon.material_index != index:
-                        continue
-                    sl = slice(polygon.loop_start, polygon.loop_start+polygon.loop_total)
-                    v = values[sl]
-                    coords[sl,0] = a*v[:,0]+b*v[:,1]+x
-                    coords[sl,1] = d*v[:,0]+e*v[:,1]+y
+                mask = loop_material == index
+                v = values[mask]
+                coords[mask, 0] = a*v[:,0]+b*v[:,1]+x
+                coords[mask, 1] = d*v[:,0]+e*v[:,1]+y
             target.data.foreach_set('uv', coords.ravel())
         yield
     finally:

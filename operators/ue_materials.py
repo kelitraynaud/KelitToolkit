@@ -23,6 +23,7 @@ import time
 
 import bpy
 
+from .material_graph import extraction_suffix, texture_extraction
 from .unreal_link import run_unreal_python
 from .usd_sync import (
     collect_materials,
@@ -87,7 +88,7 @@ def export_texture_copy(image, path, extract_alpha=False):
     elif extract_alpha:
         write_alpha_mask(image, path)
     else:
-        image.save(filepath=path, save_copy=True)
+        write_png_copy(image, path)
     digest = hashlib.sha256()
     with open(path, 'rb') as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b''):
@@ -95,6 +96,37 @@ def export_texture_copy(image, path, extract_alpha=False):
     content_hash = digest.hexdigest()
     _TEXTURE_EXPORT_CACHE[path] = (signature(), file_stamp(path), content_hash)
     return content_hash
+
+
+def write_png_copy(image, path):
+    """Write `image` to `path` as a real PNG without touching the datablock.
+
+    save(save_copy=True) keeps the source format: a JPEG image wrote JPEG
+    bytes into T_*.png. A PNG source is still saved directly (painted pixels
+    included); any other format goes through a temporary PNG image holding
+    the same pixels in the same colour space."""
+    if image.file_format == 'PNG':
+        image.save(filepath=path, save_copy=True)
+        return
+    import numpy as np
+    width, height = image.size
+    if not width or not height:
+        raise RuntimeError('Image has no pixels: ' + image.name)
+    pixels = np.empty(width * height * 4, dtype=np.float32)
+    image.pixels.foreach_get(pixels)
+    output = bpy.data.images.new('B2UE_PNGExport', width, height, alpha=True,
+                                 float_buffer=bool(image.is_float))
+    try:
+        try:
+            output.colorspace_settings.name = image.colorspace_settings.name
+        except TypeError:
+            pass
+        output.alpha_mode = image.alpha_mode if image.alpha_mode in {'STRAIGHT', 'PREMUL'} else 'STRAIGHT'
+        output.pixels.foreach_set(pixels)
+        output.file_format = 'PNG'
+        output.save(filepath=path)
+    finally:
+        bpy.data.images.remove(output)
 
 
 def write_scalar_channel(image, path, channel):
@@ -191,14 +223,14 @@ def export_material_textures(records, out_dir):
                 continue   # plugged in but switched off: nothing to import
             data = record.get(key)
             if data and 'texture' in data:
-                channel = data.get('channel')
-                extract_alpha = True if key == 'opacity' and channel == 'Alpha' else (channel if channel in {'R','G','B'} else False)
+                # an Alpha output feeding any scalar channel is extracted to
+                # a grayscale map: the master reads the red channel
+                extract_alpha = texture_extraction(key, data)
                 if extract_alpha:
                     image = bpy.data.images.get(data['image'])
                     if image is None:
                         raise RuntimeError('Missing alpha source: ' + data['image'])
-                    suffix = '_B2UE_AlphaMask' if extract_alpha is True else '_B2UE_' + extract_alpha
-                    data['texture'] = unreal_texture_name(image) + suffix
+                    data['texture'] = unreal_texture_name(image) + extraction_suffix(extract_alpha)
                 wanted.setdefault(data['texture'], (data['image'], usage, extract_alpha))
 
     exported = []
@@ -212,7 +244,7 @@ def export_material_textures(records, out_dir):
             content_hash = export_texture_copy(image, path, extract_alpha)
         except (RuntimeError, OSError) as error:
             if extract_alpha:
-                raise RuntimeError('Could not export opacity for %s: %s' % (image_name, error)) from error
+                raise RuntimeError('Could not extract a channel of %s: %s' % (image_name, error)) from error
             print(f"Build Material Instances - could not write {ue_name}: {error}")
             continue
         entry = {'name': ue_name, 'file': path.replace('\\', '/'), 'usage': usage,
@@ -580,6 +612,28 @@ try:
     BLEND_MODES = {"MASKED": unreal.BlendMode.BLEND_MASKED,
                    "TRANSLUCENT": unreal.BlendMode.BLEND_TRANSLUCENT}
 
+    # Every parameter the master exposes is written on every send, as a map
+    # or as a value, so switching a channel from map to value (or back)
+    # never leaves the previous send's value active. Parameters a project
+    # master does not have are skipped.
+    EXPOSED = {}
+    for kind, lister in (("scalar", "get_scalar_parameter_names"),
+                         ("vector", "get_vector_parameter_names"),
+                         ("texture", "get_texture_parameter_names"),
+                         ("static_switch", "get_static_switch_parameter_names")):
+        try:
+            EXPOSED[kind] = {str(n) for n in getattr(MEL, lister)(master)}
+        except Exception as error:
+            log("could not list %s parameters: %s" % (kind, error))
+            EXPOSED[kind] = None
+
+    def master_default(kind, name, fallback):
+        try:
+            value = getattr(MEL, "get_material_default_" + kind + "_parameter_value")(master, name)
+        except Exception:
+            return fallback
+        return fallback if value is None else value
+
     # --- one instance per Blender material -------------------------------
     instance_folder = PAYLOAD["instance_folder"]
     instances = {}
@@ -607,6 +661,10 @@ try:
             return previous == value
 
         def set_parameter(kind, name, value):
+            if value is None:
+                return
+            if EXPOSED.get(kind) is not None and name not in EXPOSED[kind]:
+                return
             getter = getattr(MEL, "get_material_instance_" + kind + "_parameter_value")
             if not parameter_matches(kind, getter(instance, name), value):
                 setter = getattr(MEL, "set_material_instance_" + kind + "_parameter_value")
@@ -617,57 +675,81 @@ try:
                     raise RuntimeError("Could not set %s on %s" % (name, inst_name))
                 changed[0] = True
 
-        def apply_channel(key, map_param, switch_param, value_setter):
+        def channel_texture(data):
+            if not data or "texture" not in data:
+                return None
+            tex = find_texture(data["texture"])
+            if tex is None:
+                result["missing_textures"].append(data["texture"])
+            return tex
+
+        def as_scalar(v):
+            return float(v[0] if isinstance(v, list) else v)
+
+        def as_color(v):
+            if isinstance(v, list):
+                return unreal.LinearColor(v[0], v[1], v[2], 1.0)
+            return unreal.LinearColor(v, v, v, 1.0)
+
+        WHITE_COLOR = unreal.LinearColor(1.0, 1.0, 1.0, 1.0)
+        BLACK_COLOR = unreal.LinearColor(0.0, 0.0, 0.0, 1.0)
+
+        def apply_channel(key, map_param, switch_param, value_param=None, value_kind="scalar",
+                          convert=as_scalar, with_map=None, without_data=None, fallback=None):
+            """Switch, map and value of one channel, all three written every
+            time. `with_map` is the value written while the map is used
+            (None: the master's default); `without_data` when the channel
+            is absent from the record."""
             data = record.get(key)
-            # Reset only this add-on's switch, and only if the effective value
-            # changes. Removing a mask must not leave yesterday's mask active.
-            use_map = bool(data and "texture" in data and find_texture(data["texture"]))
-            set_parameter("static_switch", switch_param, use_map)
-            if not data:
-                if key == "opacity":
-                    value_setter(1.0)
+            tex = channel_texture(data)
+            set_parameter("static_switch", switch_param, tex is not None)
+            set_parameter("texture", map_param, tex if tex is not None else
+                          master_default("texture", map_param, None))
+            if value_param is None:
                 return
-            if "texture" in data:
-                tex = find_texture(data["texture"])
-                if tex is None:
-                    result["missing_textures"].append(data["texture"])
-                    return
-                set_parameter("texture", map_param, tex)
-            elif "value" in data:
-                value_setter(data["value"])
+            if tex is not None:
+                value = with_map
+            elif data and "value" in data:
+                value = convert(data["value"])
+            else:
+                value = without_data
+            if value is None:
+                value = master_default(value_kind, value_param, fallback)
+            set_parameter(value_kind, value_param, value)
 
-        apply_channel(
-            "base_color", "BaseColorMap", "UseBaseColorMap",
-            lambda v: set_parameter(
-                "vector", "BaseColorTint",
-                unreal.LinearColor(v[0], v[1], v[2], 1.0) if isinstance(v, list) else
-                unreal.LinearColor(v, v, v, 1.0)))
-        apply_channel(
-            "roughness", "RoughnessMap", "UseRoughnessMap",
-            lambda v: set_parameter(
-                "scalar", "Roughness", float(v if not isinstance(v, list) else v[0])))
-        apply_channel(
-            "metallic", "MetallicMap", "UseMetallicMap",
-            lambda v: set_parameter(
-                "scalar", "Metallic", float(v if not isinstance(v, list) else v[0])))
-        apply_channel("normal", "NormalMap", "UseNormalMap", lambda v: None)
-        apply_channel(
-            "opacity", "OpacityMap", "UseOpacityMap",
-            lambda v: set_parameter(
-                "scalar", "Opacity", float(v if not isinstance(v, list) else v[0])))
+        # a map multiplied by a leftover tint would darken it: white
+        apply_channel("base_color", "BaseColorMap", "UseBaseColorMap", "BaseColorTint", "vector",
+                      as_color, with_map=WHITE_COLOR, fallback=WHITE_COLOR)
+        apply_channel("roughness", "RoughnessMap", "UseRoughnessMap", "Roughness", fallback=0.5)
+        apply_channel("metallic", "MetallicMap", "UseMetallicMap", "Metallic", fallback=0.0)
+        apply_channel("normal", "NormalMap", "UseNormalMap")
+        apply_channel("opacity", "OpacityMap", "UseOpacityMap", "Opacity",
+                      without_data=1.0, fallback=1.0)
 
+        # emission: always written, off (strength 0, black tint, no map)
+        # when the material does not emit
         emissive = record.get("emissive")
-        strength = record.get("emissive_strength", 0.0)
-        if emissive and strength:
-            if "texture" in emissive:
-                tex = find_texture(emissive["texture"])
-                if tex is not None:
-                    set_parameter("texture", "EmissiveMap", tex)
-                    set_parameter("static_switch", "UseEmissiveMap", True)
-            elif isinstance(emissive.get("value"), list):
-                v = emissive["value"]
-                set_parameter("vector", "EmissiveTint", unreal.LinearColor(v[0], v[1], v[2], 1.0))
-            set_parameter("scalar", "EmissiveStrength", float(strength))
+        strength = float(record.get("emissive_strength", 0.0) or 0.0)
+        emissive_map = channel_texture(emissive) if strength else None
+        if not strength or not emissive:
+            tint, strength = BLACK_COLOR, 0.0
+        elif emissive_map is not None:
+            tint = WHITE_COLOR
+        elif isinstance(emissive.get("value"), list):
+            tint = as_color(emissive["value"])
+        else:
+            tint, strength = BLACK_COLOR, 0.0   # missing map: reported above
+        set_parameter("static_switch", "UseEmissiveMap", emissive_map is not None)
+        set_parameter("texture", "EmissiveMap", emissive_map if emissive_map is not None else
+                      master_default("texture", "EmissiveMap", None))
+        set_parameter("vector", "EmissiveTint", tint)
+        set_parameter("scalar", "EmissiveStrength", strength)
+
+        # nothing in Blender drives these: back to the master's defaults
+        set_parameter("texture", "DisplacementMap", master_default("texture", "DisplacementMap", None))
+        set_parameter("scalar", "DisplacementScale", master_default("scalar", "DisplacementScale", 0.0))
+        # the UV transform is baked into the mesh UVs
+        set_parameter("scalar", "UVTiling", master_default("scalar", "UVTiling", 1.0))
 
         # blend mode and two-sidedness are per-instance overrides
         try:
@@ -723,6 +805,10 @@ try:
             assets_by_name.setdefault(name.lower(), path.split(".")[0])
 
     result["unmatched_objects"] = []
+    # resolve every object first: several objects can share one Static Mesh
+    # asset (Alt+D duplicates) while their slots, linked to the object, use
+    # different materials
+    groups = {}
     for object_name, slot_names in PAYLOAD["slots"].items():
         components = by_tag.get(object_name) or by_label.get(object_name) or []
         mesh = components[0].static_mesh if components else None
@@ -739,22 +825,52 @@ try:
         if EAL.get_metadata_tag(mesh, 'B2UE_UVPlan') != PAYLOAD.get('uv_signatures', {}).get(object_name, ''):
             result['errors'].append(object_name + ': UV mapping changed. Use Send to Unreal to update geometry first.')
             continue
-        for index, blender_material in enumerate(slot_names):
+        groups.setdefault(mesh.get_path_name(), (mesh, []))[1].append(
+            (object_name, components, list(slot_names)))
+
+    for mesh, users in groups.values():
+        # the asset keeps the most common slot list (the first one on a tie);
+        # objects that differ get per-actor component overrides
+        counts = {}
+        for _name, _components, slot_names in users:
+            counts[tuple(slot_names)] = counts.get(tuple(slot_names), 0) + 1
+        shared = list(max(counts, key=lambda k: (counts[k], -[tuple(u[2]) for u in users].index(k))))
+        for index, blender_material in enumerate(shared):
             instance = instances.get(blender_material)
             if instance is None:
                 continue
             try:
                 # on the ASSET, so every actor using it and every later
-                # placement gets it; component overrides are cleared
+                # placement gets it
                 if mesh.get_material(index) != instance:
                     mesh.set_material(index, instance)
-                for component in components:
-                    overrides = component.get_editor_property("override_materials")
-                    if index < len(overrides) and overrides[index] is not None:
-                        component.set_material(index, None)
-                result["assigned"] += 1
             except Exception as error:
-                result["errors"].append("%s slot %d: %s" % (object_name, index, error))
+                result["errors"].append("%s slot %d: %s" % (mesh.get_name(), index, error))
+        for object_name, components, slot_names in users:
+            own = slot_names != shared
+            if own and not components:
+                result["errors"].append("%s: materials differ from the shared mesh %s but no actor "
+                                        "was found to carry them" % (object_name, mesh.get_name()))
+                continue
+            for index, blender_material in enumerate(slot_names):
+                instance = instances.get(blender_material)
+                if instance is None:
+                    continue
+                try:
+                    for component in components:
+                        overrides = component.get_editor_property("override_materials")
+                        current = overrides[index] if index < len(overrides) else None
+                        if own and blender_material != (shared[index] if index < len(shared) else None):
+                            # component override: this actor only
+                            if current != instance:
+                                component.set_material(index, instance)
+                        elif current is not None:
+                            component.set_material(index, None)
+                    result["assigned"] += 1
+                except Exception as error:
+                    result["errors"].append("%s slot %d: %s" % (object_name, index, error))
+            if own:
+                result["actor_overrides"] = result.get("actor_overrides", 0) + 1
         EAL.save_loaded_asset(mesh, only_if_is_dirty=True)
 
     # USD merges a rig's skinning targets into one SkeletalMesh and numbers
@@ -900,6 +1016,8 @@ def build_material_instances(context, objects, two_sided='OFF', alpha_mode='AUTO
         message += ", master created"
     elif data.get('master_upgraded'):
         message += ", master upgraded (opacity)"
+    if data.get('actor_overrides'):
+        message += f", {data['actor_overrides']} actor(s) with their own materials"
     if data.get('missing_textures'):
         unique = sorted(set(data['missing_textures']))
         message += f", {len(unique)} texture(s) not found"
@@ -968,10 +1086,13 @@ class UNREAL_OT_build_material_instances(bpy.types.Operator):
 
     def execute(self, context):
         settings = context.scene.kelit_toolkit_settings
-        success, message, _data = build_material_instances(
-            context, self._resolve_objects(context),
-            two_sided=settings.sync_two_sided or 'OFF',
-            alpha_mode=settings.sync_alpha_mode or 'AUTO')
+        try:
+            success, message, _data = build_material_instances(
+                context, self._resolve_objects(context),
+                two_sided=settings.sync_two_sided or 'OFF',
+                alpha_mode=settings.sync_alpha_mode or 'AUTO')
+        except (RuntimeError, OSError) as error:
+            success, message = False, f"Materials not built: {error}"
         self.report({'INFO'} if success else {'ERROR'}, message)
         return {'FINISHED'} if success else {'CANCELLED'}
 
