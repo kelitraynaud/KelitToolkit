@@ -187,13 +187,67 @@ def is_exportable(obj):
 # MATERIAL TRANSFER
 # ============================================================================
 
-def unreal_texture_name(image):
-    """Mirror the asset name Unreal's USD import gives an imported texture."""
+def plain_texture_name(image):
+    """T_<stem>: the image name without its extension or Blender's '.001'
+    suffix, the name Unreal's USD import gives an imported texture."""
     stem = os.path.splitext(os.path.basename(image.name))[0]
     # sanitized as a whole: a stem starting with a digit must not get the
     # leading underscore prim names need ('T__2573...' duplicated the
     # 'T_2573...' asset Unreal already had)
     return sanitize_prim_name('T_' + stem)
+
+
+_PACKED_IDENTITY_CACHE = {}
+
+
+def image_identity(image):
+    """What makes two image datablocks the same texture: the absolute file
+    they read (two datablocks on one file are one texture), the packed bytes,
+    or for a generated/painted-only image the datablock itself."""
+    packed = image.packed_file
+    if packed is not None:
+        key = (image.as_pointer(), packed.as_pointer(), packed.size)
+        identity = _PACKED_IDENTITY_CACHE.get(key)
+        if identity is None:
+            import hashlib
+            identity = 'packed:' + hashlib.sha1(bytes(packed.data)).hexdigest()
+            _PACKED_IDENTITY_CACHE[key] = identity
+        return identity
+    if image.source in {'FILE', 'SEQUENCE', 'TILED', 'MOVIE'} and image.filepath:
+        path = bpy.path.abspath(image.filepath, library=image.library)
+        return 'file:' + os.path.normcase(os.path.normpath(path))
+    library = image.library.filepath if image.library else ''
+    return 'datablock:' + library + '|' + image.name
+
+
+def unreal_texture_name(image):
+    """
+    Unique Unreal asset name of an image.
+
+    The plain T_<stem> name drops the extension and Blender's '.001' suffix,
+    and Unreal compares names without case: 'Wood', 'Wood.001', 'Wood.jpg'
+    and 'wood.png' would all become T_Wood, one file would be exported and
+    the other materials would show the wrong map. When distinct images share
+    a plain name (case-insensitive), each gets a short stable hash of its
+    file path or packed data appended. Without a collision the plain name is
+    kept, which is what the assets already in users' projects are called.
+    """
+    import hashlib
+    plain = plain_texture_name(image)
+    key = plain.casefold()
+    identities = set()
+    for other in bpy.data.images:
+        if other != image and other.users == 0:
+            continue
+        if plain_texture_name(other).casefold() == key:
+            identities.add(image_identity(other))
+            if len(identities) > 1:
+                break
+    if len(identities) <= 1:
+        return plain
+    digest = hashlib.sha1(image_identity(image).encode('utf-8')).hexdigest()[:8]
+    # a letter first: Unreal strips a trailing '_<digits>' from some names
+    return sanitize_prim_name(plain + '_H' + digest)
 
 
 def resolve_bsdf_input(socket, depth=0):
@@ -1583,6 +1637,22 @@ try:
             cache_reason = str(error)
     log('Geometry cache: ' + ('hit' if static_reused else cache_reason))
     if PAYLOAD['usd_file'] and not static_reused:
+        # Invalidate before touching anything: a failed or partial import
+        # must never leave a cache file (or mesh metadata) that a later
+        # identical fingerprint would trust.
+        try:
+            os.remove(PAYLOAD['cache_file'])
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            log('could not invalidate the geometry cache: %s' % error)
+        for path in cached_paths:
+            try:
+                asset = unreal.EditorAssetLibrary.load_asset(path)
+                if asset is not None and unreal.EditorAssetLibrary.get_metadata_tag(asset, 'B2UE_StaticImportHash'):
+                    unreal.EditorAssetLibrary.remove_metadata_tag(asset, 'B2UE_StaticImportHash')
+            except Exception as error:
+                log('could not clear the import hash of %s: %s' % (path, error))
         import_usd(PAYLOAD['usd_file'], dest, False)
     if static_reused:
         log('Static geometry unchanged: reusing %d meshes' % len(cached_paths))
@@ -1785,6 +1855,16 @@ try:
             with open(cache_file + '.tmp', 'w', encoding='utf-8') as handle:
                 json.dump({'version': 1, 'fingerprint': fingerprint, 'assets': paths}, handle)
             os.replace(cache_file + '.tmp', cache_file)
+    elif not static_reused:
+        # re-imported but not cacheable (meshes missing, no fingerprint):
+        # no mesh may keep a hash from an earlier import
+        for asset in set(resolved.values()):
+            try:
+                if unreal.EditorAssetLibrary.get_metadata_tag(asset, 'B2UE_StaticImportHash'):
+                    unreal.EditorAssetLibrary.remove_metadata_tag(asset, 'B2UE_StaticImportHash')
+                    unreal.EditorAssetLibrary.save_loaded_asset(asset, only_if_is_dirty=True)
+            except Exception as error:
+                log('could not clear the import hash of %s: %s' % (asset.get_name(), error))
 
     if PAYLOAD['place_in_level']:
         subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
@@ -2650,13 +2730,26 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
                         setattr(self, name, stored)
                     except TypeError:
                         pass  # stored enum value no longer exists
-        from . import ue_remote
-        try:
-            self._target_node = ue_remote.resolve_target()
-        except ue_remote.TargetSelectionError as error:
-            self.report({'ERROR'}, str(error))
+        self._target_node = self._resolve_target_or_report()
+        if self._target_node is None:
             return {'CANCELLED'}
         return context.window_manager.invoke_props_dialog(self, width=440)
+
+    def _resolve_target_or_report(self):
+        """The Unreal editor to send to, or None after reporting why. When
+        no editor answered at all, the Connection Doctor opens: it explains
+        why and can fix the project files."""
+        from . import ue_remote, unreal_link
+        try:
+            return ue_remote.resolve_target()
+        except ue_remote.TargetSelectionError as error:
+            self.report({'ERROR'}, str(error))
+        except ConnectionError:
+            self.report({'ERROR'}, f"Unreal connection failed: {unreal_link.NO_EDITOR_MESSAGE}")
+            unreal_link.open_connection_doctor()
+        except Exception as error:
+            self.report({'ERROR'}, f"Unreal discovery failed: {error}")
+        return None
 
     def _remember_options(self, context):
         settings = context.scene.kelit_toolkit_settings
@@ -2740,10 +2833,8 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
 
     def execute(self, context):
         from . import ue_remote
-        try:
-            target = getattr(self, '_target_node', None) or ue_remote.resolve_target()
-        except ue_remote.TargetSelectionError as error:
-            self.report({'ERROR'}, str(error))
+        target = getattr(self, '_target_node', None) or self._resolve_target_or_report()
+        if target is None:
             return {'CANCELLED'}
         self._target_node = target
         self._remember_options(context)
@@ -3015,9 +3106,15 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
                 self._step(context, wm, 95, "building the material instances...")
                 from .ue_materials import build_material_instances
                 started = time.perf_counter()
-                built, material_message, _data = build_material_instances(
-                    context, all_objects, two_sided=self.two_sided, alpha_mode=self.alpha_mode,
-                    skeletal_paths=result.get('skeletal_paths', {}))
+                try:
+                    built, material_message, _data = build_material_instances(
+                        context, all_objects, two_sided=self.two_sided, alpha_mode=self.alpha_mode,
+                        skeletal_paths=result.get('skeletal_paths', {}))
+                except (RuntimeError, OSError) as error:
+                    # a missing alpha source or image: the geometry is in
+                    # Unreal already, report the materials as a warning
+                    print(f"[KelitToolkit] materials not built: {error}")
+                    built, material_message = False, f"materials not built: {error}"
                 self._timings['materials_seconds'] = round(time.perf_counter() - started, 3)
                 message += " - " + material_message
                 if not built:
