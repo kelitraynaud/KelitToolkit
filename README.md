@@ -134,18 +134,22 @@ Transforms
   scale applied, import empties removed.
 - **Fix Bone Lengths**: shortens bones far too long for their place in the
   rig, without changing their orientation or the animation.
+- **Auto Align**: finds an object's natural axes from its faces and lines
+  it up with the world (Rotate), bakes that rotation into the mesh (Bake), or
+  keeps the object in place and only realigns its local axes (Keep). Useful
+  for props that arrive tilted.
 - **Bake Camera Animation**: bakes the camera's final motion and focus onto
   the camera itself, so its rig can be deleted.
 
 Instances
 
 - **Detect Duplicates > Instances**: objects with the same shape, UVs and
-  materials share one mesh, even when their position was baked into the
-  mesh.
+  materials share one mesh, even when their position or their rotation was
+  baked into the mesh (Rotated Copies option).
 - **Rejoin Material Splits**: objects an export cut per material
   (`Box074Material260`, `Box074Material310`) become one object again.
 - **Split Repeated Parts**: elements repeated inside one mesh come out as
-  instances; pieces that touch stay together.
+  instances, rotated copies included; pieces that touch stay together.
 - **Replace with Active**, **Group Similar in Collection**, **Realize
   Modifiers to Instances**.
 
@@ -169,6 +173,11 @@ Mesh
   distance before applying: decimation keeps the UVs but can change shading.
 - **Create Collision Mesh** (UCX convex hull, box, sphere) and **Generate
   LODs**.
+- **Add Socket**: adds an empty named `SOCKET_<name>` at the 3D cursor,
+  parented to the active mesh. Every `SOCKET_` empty under a mesh becomes a
+  socket of its Static Mesh in Unreal (attach points for props, lights or
+  effects), on Send to Unreal and in FBX exports. Sockets created by hand in
+  Unreal are left alone.
 
 ### Clean & Check
 
@@ -272,6 +281,10 @@ Use **Fix Permanently (DefaultEngine.ini)** (Advanced) and restart Unreal.
 - The remote-execution endpoints can be changed in the add-on preferences.
 
 ## Changelog
+
+**Next**: Auto Align (Rotate, Bake, Keep), rotated copies recognized by
+Detect Duplicates and Split Repeated Parts, Static Mesh sockets from
+`SOCKET_` empties (Send to Unreal and FBX), Add Socket.
 
 **0.9.4**: review release, nothing new, everything safer.
 

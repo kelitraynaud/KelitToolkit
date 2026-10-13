@@ -40,6 +40,12 @@ from ..operators.materials import (
     OBJECT_OT_merge_duplicate_materials,
     OBJECT_OT_merge_duplicate_images,
 )
+from ..operators.auto_align import (
+    OBJECT_OT_auto_align,
+)
+from ..operators.sockets import (
+    OBJECT_OT_kelit_add_socket,
+)
 from ..operators.ai_optimize import (
     OBJECT_OT_optimize_ai_meshes,
     OBJECT_OT_remove_ai_optimize,
@@ -129,6 +135,8 @@ from ..operators import (
     auto_clean as _m_auto_clean,
     scene_weight as _m_scene_weight,
     ai_optimize as _m_ai_optimize,
+    auto_align as _m_auto_align,
+    sockets as _m_sockets,
     split_merge as _m_split_merge,
 )
 
@@ -136,6 +144,8 @@ SEARCH_SECTIONS = (
     (_m_auto_clean, 'Clean · Auto Clean'),
     (_m_scene_weight, 'Clean · Scene'),
     (_m_ai_optimize, 'Prepare · Mesh'),
+    (_m_auto_align, 'Prepare · Transforms'),
+    (_m_sockets, 'Prepare · Mesh'),
     (_m_split_merge, 'Prepare · Instances'),
     (_m_usd_sync, 'Send · USD'),
     (_m_unified_export, 'Send · Export'),
@@ -336,6 +346,8 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
                      text="Rescale Rig + Animation", icon='ARMATURE_DATA')
         col.operator(OBJECT_OT_fix_bone_lengths.bl_idname,
                      text="Fix Bone Lengths", icon='BONE_DATA')
+        col.operator(OBJECT_OT_auto_align.bl_idname,
+                     text="Auto Align", icon='ORIENTATION_LOCAL')
         col.operator(OBJECT_OT_bake_camera_animation.bl_idname,
                      text="Bake Camera Animation", icon='CAMERA_DATA')
 
@@ -387,6 +399,8 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
                      text="Create Collision Mesh", icon='MESH_ICOSPHERE')
         col.operator(OBJECT_OT_generate_lods.bl_idname,
                      text="Generate LODs", icon='OUTLINER_DATA_MESH')
+        col.operator(OBJECT_OT_kelit_add_socket.bl_idname,
+                     text="Add Socket", icon='EMPTY_ARROWS')
 
     # ------------------------------------------------------------------
     # CLEAN & CHECK
