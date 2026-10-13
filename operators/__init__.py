@@ -18,6 +18,7 @@ from . import scene_weight
 from . import ai_optimize
 from . import split_merge
 from . import auto_clean
+from . import sockets
 
 
 def register():
@@ -39,9 +40,11 @@ def register():
     unreal_link.register()
     usd_sync.register()
     ue_materials.register()
+    sockets.register()
 
 
 def unregister():
+    sockets.unregister()
     ue_materials.unregister()
     usd_sync.unregister()
     unreal_link.unregister()

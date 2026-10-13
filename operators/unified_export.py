@@ -23,6 +23,7 @@ import bpy
 
 from ..utils import clean_name
 from .export import is_companion_object, find_companion_objects
+from .sockets import socket_children
 
 
 UE_NAME_PREFIXES = ('SM_', 'SK_', 'SKM_', 'A_', 'AM_', 'S_', 'BP_', 'UCX_', 'UBX_', 'USP_', 'UCP_')
@@ -108,10 +109,14 @@ def collect_assets(context, objects, asset_type='AUTO', include_companions=True)
             used.add(obj.name)
             continue
         companions = find_companion_objects(obj, scene_meshes) if include_companions else []
+        # SOCKET_ empties under the mesh: shipped in its FBX, where Unreal's
+        # importer turns them into Static Mesh sockets
+        sockets = socket_children(obj)
         assets.append({'type': 'STATIC', 'name': obj.name,
-                       'root': obj, 'objects': [obj] + companions})
+                       'root': obj, 'objects': [obj] + companions, 'sockets': sockets})
         used.add(obj.name)
         used.update(companion.name for companion in companions)
+        used.update(socket.name for socket in sockets)
 
     # --- scene: whatever is left that USD/FBX can carry ---
     leftovers = [o for o in objects
@@ -357,7 +362,7 @@ def export_asset_fbx(filepath, asset, include_animation):
     elif asset['type'] == 'STATIC':
         # parity with the legacy Batch FBX Export settings
         kwargs.update(
-            object_types={'MESH'},
+            object_types={'MESH', 'EMPTY'} if asset.get('sockets') else {'MESH'},
             apply_scale_options='FBX_SCALE_ALL',
             bake_anim=False,
         )
@@ -498,7 +503,11 @@ class UNREAL_OT_export_assets(bpy.types.Operator):
             origin_ctx = at_world_origin(asset) if (
                 asset['type'] == 'STATIC' and self.export_at_origin) else contextlib.nullcontext()
             try:
-                with isolated_selection(asset['objects']), \
+                # sockets travel in FBX files only (USD has no socket notion
+                # Unreal reads); they hang below the root, so the origin move
+                # carries them
+                members = asset['objects'] + (asset.get('sockets', []) if self.file_format == 'FBX' else [])
+                with isolated_selection(members), \
                         action_frame_range(context, asset, self.include_animation), \
                         origin_ctx:
                     backend(filepath, asset, self.include_animation)

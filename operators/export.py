@@ -3,6 +3,7 @@ import re
 
 import bpy
 import mathutils
+from .sockets import socket_children
 from ..utils import (
     clean_name,
     iter_action_fcurves,
@@ -734,9 +735,13 @@ class OBJECT_OT_batch_fbx_export(bpy.types.Operator):
 
             companions = find_companion_objects(obj, scene_meshes) if self.include_companions else []
             export_group = [obj] + companions
+            # SOCKET_ empties under the mesh: Unreal's FBX importer turns
+            # them into Static Mesh sockets. Children of obj, so they follow
+            # the origin move without being moved themselves.
+            sockets = socket_children(obj)
 
             # Select the whole group
-            for member in export_group:
+            for member in export_group + sockets:
                 member.select_set(True)
             context.view_layer.objects.active = obj
 
@@ -772,7 +777,7 @@ class OBJECT_OT_batch_fbx_export(bpy.types.Operator):
                 bpy.ops.export_scene.fbx(
                     filepath=filepath,
                     use_selection=True,
-                    object_types={'MESH'},
+                    object_types={'MESH', 'EMPTY'} if sockets else {'MESH'},
                     use_mesh_modifiers=self.apply_modifiers,
                     mesh_smooth_type='FACE',
                     use_tspace=self.use_tangent_space,
@@ -791,7 +796,7 @@ class OBJECT_OT_batch_fbx_export(bpy.types.Operator):
                 # Always restore positions and selection, even if export fails
                 for member, original_matrix in moved:
                     member.matrix_world = original_matrix
-                for member in export_group:
+                for member in export_group + sockets:
                     member.select_set(False)
 
         # Restore original selection

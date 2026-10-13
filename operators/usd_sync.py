@@ -27,6 +27,7 @@ import time
 import bpy
 
 from .unreal_link import run_unreal_python
+from .sockets import is_socket_marker, extract_sockets, bone_sockets
 from .unified_export import (
     get_deform_armature,
     is_descendant_of,
@@ -103,17 +104,20 @@ def collect_scene_objects(selection):
     Expand a selection into the full set of objects to sync:
     ancestors (parent empties) AND descendants (children of selected roots).
     Returned ordered parents-first (by hierarchy depth).
+
+    SOCKET_ empties are left out: they become Static Mesh sockets (see
+    sockets.py), never level actors or USD prims.
     """
     gathered = {}
 
     def add(obj):
-        if obj is not None and obj.type in SYNCABLE_TYPES:
+        if obj is not None and obj.type in SYNCABLE_TYPES and not is_socket_marker(obj):
             gathered[obj.name] = obj
 
     for obj in selection:
         if obj.type not in SYNCABLE_TYPES:
             continue
-        add(obj)
+        add(obj)  # a selected socket brings its mesh through the walk up
         # Walk up so hierarchy empties come along
         parent = obj.parent
         while parent is not None:
@@ -953,6 +957,8 @@ def build_scene_graph(objects):
             'location': convert_blender_to_unreal_location(location),
             'rotation': convert_blender_rotation_to_unreal_rotation(euler),
             'scale': list(scale),
+            # Static Mesh sockets from the SOCKET_ empties under the mesh
+            'sockets': extract_sockets(obj) if is_mesh else [],
         })
     return entries
 
@@ -1866,6 +1872,153 @@ try:
             except Exception as error:
                 log('could not clear the import hash of %s: %s' % (asset.get_name(), error))
 
+    # 2c) Static Mesh sockets from the SOCKET_ empties. Only sockets this
+    # add-on created (listed in the asset's B2UE_Sockets metadata) are ever
+    # removed: sockets made by hand in Unreal stay. Defensive throughout -
+    # a socket problem is logged, it never fails the send.
+    result['sockets'] = 0
+    result['sockets_removed'] = 0
+
+    def sockets_differ(first, second):
+        if [s['name'].lower() for s in first] != [s['name'].lower() for s in second]:
+            return True
+        for a, b in zip(first, second):
+            for key in ('location', 'rotation', 'scale'):
+                if any(abs(float(x) - float(y)) > 0.01 for x, y in zip(a[key], b[key])):
+                    return True
+        return False
+
+    def socket_label(socket):
+        try:
+            return str(socket.get_editor_property('socket_name'))
+        except Exception:
+            return str(getattr(socket, 'socket_name', ''))
+
+    def mesh_sockets(mesh):
+        try:
+            return list(mesh.get_editor_property('sockets') or [])
+        except Exception:
+            return []
+
+    def find_mesh_socket(mesh, name):
+        if hasattr(mesh, 'find_socket'):
+            try:
+                found = mesh.find_socket(name)
+                if found is not None:
+                    return found
+            except Exception:
+                pass
+        for socket in mesh_sockets(mesh):
+            if socket_label(socket).lower() == name.lower():
+                return socket
+        return None
+
+    def new_mesh_socket(mesh):
+        socket = None
+        if hasattr(unreal, 'new_object'):
+            try:
+                socket = unreal.new_object(unreal.StaticMeshSocket, mesh)
+            except Exception:
+                socket = None
+        if socket is None:
+            socket = unreal.StaticMeshSocket(mesh)
+        if hasattr(mesh, 'add_socket'):
+            mesh.add_socket(socket)
+        else:
+            mesh.set_editor_property('sockets', mesh_sockets(mesh) + [socket])
+        return socket
+
+    def remove_mesh_socket(mesh, socket):
+        if hasattr(mesh, 'remove_socket'):
+            mesh.remove_socket(socket)
+        else:
+            mesh.set_editor_property('sockets', [s for s in mesh_sockets(mesh) if s is not socket])
+
+    def apply_sockets(mesh, wanted):
+        try:
+            previous = json.loads(unreal.EditorAssetLibrary.get_metadata_tag(mesh, 'B2UE_Sockets') or '[]')
+        except (TypeError, ValueError):
+            previous = []
+        if not wanted and not previous:
+            return 0, 0
+        if not hasattr(unreal, 'StaticMeshSocket'):
+            log('sockets skipped for %s: StaticMeshSocket is not exposed to Python' % mesh.get_name())
+            return 0, 0
+        try:
+            mesh.modify()
+        except Exception:
+            pass
+        written = 0
+        kept = []
+        for data in wanted:
+            try:
+                socket = find_mesh_socket(mesh, data['name'])
+                if socket is None:
+                    socket = new_mesh_socket(mesh)
+                loc, rot, scale = data['location'], data['rotation'], data['scale']
+                socket.set_editor_property('socket_name', data['name'])
+                socket.set_editor_property('relative_location', unreal.Vector(loc[0], loc[1], loc[2]))
+                socket.set_editor_property('relative_rotation', unreal.Rotator(roll=rot[2], pitch=rot[0], yaw=rot[1]))
+                socket.set_editor_property('relative_scale', unreal.Vector(scale[0], scale[1], scale[2]))
+                kept.append(data['name'])
+                written += 1
+            except Exception as error:
+                log('socket %s on %s failed: %s' % (data.get('name'), mesh.get_name(), str(error)[:120]))
+        removed = 0
+        wanted_names = set(name.lower() for name in kept)
+        for name in previous:
+            if str(name).lower() in wanted_names:
+                continue
+            try:
+                socket = find_mesh_socket(mesh, str(name))
+                if socket is not None:
+                    remove_mesh_socket(mesh, socket)
+                    removed += 1
+            except Exception as error:
+                log('stale socket %s on %s not removed: %s' % (name, mesh.get_name(), str(error)[:120]))
+        try:
+            if kept:
+                unreal.EditorAssetLibrary.set_metadata_tag(mesh, 'B2UE_Sockets', json.dumps(kept))
+            else:
+                unreal.EditorAssetLibrary.remove_metadata_tag(mesh, 'B2UE_Sockets')
+        except Exception as error:
+            log('socket tag not written on %s: %s' % (mesh.get_name(), error))
+        try:
+            unreal.EditorAssetLibrary.save_loaded_asset(mesh, only_if_is_dirty=False)
+        except Exception as error:
+            log('could not save the sockets of %s: %s' % (mesh.get_name(), error))
+        return written, removed
+
+    # one socket list per asset: a shared mesh takes the sockets of the
+    # first object that defines some, other definitions only warn
+    socket_plan = {}
+    socket_order = []
+    for entry in PAYLOAD['objects']:
+        mesh = resolved.get(entry['name']) if entry['type'] == 'MESH' else None
+        if mesh is None:
+            continue
+        key = mesh.get_path_name()
+        wanted = entry.get('sockets') or []
+        plan = socket_plan.get(key)
+        if plan is None:
+            socket_plan[key] = [mesh, wanted, entry['name']]
+            socket_order.append(key)
+        elif wanted and not plan[1]:
+            plan[1], plan[2] = wanted, entry['name']
+        elif wanted and sockets_differ(plan[1], wanted):
+            log('WARNING: %s and %s share %s but define different sockets: '
+                'the sockets of %s are used' % (plan[2], entry['name'], mesh.get_name(), plan[2]))
+    for key in socket_order:
+        mesh, wanted, _owner = socket_plan[key]
+        try:
+            written, removed = apply_sockets(mesh, wanted)
+            result['sockets'] += written
+            result['sockets_removed'] += removed
+            if written or removed:
+                log('sockets on %s: %d written, %d removed' % (mesh.get_name(), written, removed))
+        except Exception as error:
+            log('sockets skipped for %s: %s' % (key, str(error)[:120]))
+
     if PAYLOAD['place_in_level']:
         subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
 
@@ -2513,6 +2666,30 @@ def parse_sync_result(output):
     return None, None
 
 
+def sync_result_message(result):
+    """The send's final report, built from the B2UE_RESULT line."""
+    missing = result.get('missing') or []
+    message = (f"{result.get('assets', 0)} asset(s), "
+               f"{result.get('spawned', 0)} actor(s) placed, "
+               f"{result.get('attached', 0)} attached")
+    if result.get('static_reused'):
+        message += f", {result['static_reused']} mesh(es) reused"
+    if result.get('skeletal'):
+        message += f", {result['skeletal']} skeletal"
+    if result.get('two_sided_fixed'):
+        message += f", {result['two_sided_fixed']} two-sided fix"
+    if result.get('sockets'):
+        message += f", {result['sockets']} socket(s)"
+    if result.get('sockets_removed'):
+        message += f", {result['sockets_removed']} old socket(s) removed"
+    if result.get('sequence'):
+        message += (f" - LevelSequence: {result.get('sequence_bindings', 0)} binding(s)"
+                    + (" + camera cut" if result.get('camera_cut') else ""))
+    if missing:
+        message += f" - {len(missing)} mesh(es) not matched (see console)"
+    return message
+
+
 # ============================================================================
 # OPERATORS
 # ============================================================================
@@ -2875,6 +3052,11 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
                 self.report({'WARNING'}, "Nothing to send: select mesh objects first")
             return {'CANCELLED'}
 
+        ignored_bone_sockets = bone_sockets(collect_scene_objects(self._base_objects(context)))
+        if ignored_bone_sockets:
+            print('[KelitToolkit] SOCKET_ empties under an armature ignored (bone sockets '
+                  'are not supported): ' + ', '.join(ignored_bone_sockets))
+
         from .material_graph import record_warnings
         if self.import_materials and self.material_source == 'MASTER':
             warnings = record_warnings(extract_material_data(collect_materials(all_objects)))
@@ -3082,21 +3264,10 @@ class UNREAL_OT_usd_scene_sync(bpy.types.Operator):
 
         if result:
             missing = result.get('missing') or []
-            message = (f"{result.get('assets', 0)} asset(s), "
-                       f"{result.get('spawned', 0)} actor(s) placed, "
-                       f"{result.get('attached', 0)} attached")
-            if result.get('static_reused'):
-                message += f", {result['static_reused']} mesh(es) reused"
-            if result.get('skeletal'):
-                message += f", {result['skeletal']} skeletal"
-            if result.get('two_sided_fixed'):
-                message += f", {result['two_sided_fixed']} two-sided fix"
+            message = sync_result_message(result)
             if result.get('sequence'):
-                message += (f" - LevelSequence: {result.get('sequence_bindings', 0)} binding(s)"
-                            + (" + camera cut" if result.get('camera_cut') else ""))
                 print(f"USD Scene Sync - sequence created: {result['sequence']}")
             if missing:
-                message += f" - {len(missing)} mesh(es) not matched (see console)"
                 print(f"USD Scene Sync - unmatched meshes: {missing}")
             if self.import_materials and self.material_source == 'MASTER' and collect_materials(all_objects):
                 self._step(context, wm, 95, "building the material instances...")
