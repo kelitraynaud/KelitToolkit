@@ -1,13 +1,14 @@
 {
   "version": "v1",
   "blocklist": [],
+  "assetlib_auth_method": "PER_LIBRARY",
   "data": [
     {
       "schema_version": "1.0.0",
       "id": "kelittoolkit",
       "name": "Kelit Toolkit",
       "tagline": "Prepare and send Blender scenes to Unreal Engine",
-      "version": "0.9.4",
+      "version": "0.9.5",
       "type": "add-on",
       "maintainer": "K\u00e9lit Raynaud <kelitraynaud@gmail.com>",
       "license": [
@@ -29,8 +30,8 @@
         "Scene"
       ],
       "archive_url": "./kelittoolkit.zip",
-      "archive_size": 207048,
-      "archive_hash": "sha256:532dfe941847052048a36dd05abfca7f42f6b0ebcc51b7577f32223f4bd43fc7"
+      "archive_size": 233569,
+      "archive_hash": "sha256:d7da40678b13ccf60722f1d0549a44bedbd6da06752cc3b8de08142c1845ae01"
     }
   ]
 }
