@@ -33,7 +33,7 @@ class OBJECT_OT_convert_to_simple_pbr(bpy.types.Operator):
                     continue
 
                 mat = slot.material
-                if not mat.use_nodes:
+                if mat.node_tree is None:
                     continue
 
                 nodes = mat.node_tree.nodes
@@ -195,7 +195,7 @@ class OBJECT_OT_detect_unsupported_nodes(bpy.types.Operator):
         problematic_materials = {}
 
         for mat in bpy.data.materials:
-            if not mat.use_nodes:
+            if mat.node_tree is None:
                 continue
 
             unsupported_in_mat = []
@@ -266,7 +266,7 @@ class OBJECT_OT_bake_procedural_to_texture(bpy.types.Operator):
                     continue
 
                 for slot in obj.material_slots:
-                    if not slot.material or not slot.material.use_nodes:
+                    if not slot.material or slot.material.node_tree is None:
                         continue
 
                     mat = slot.material
@@ -319,7 +319,7 @@ class OBJECT_OT_texture_path_validator(bpy.types.Operator):
         valid_count = 0
 
         for mat in bpy.data.materials:
-            if not mat.use_nodes:
+            if mat.node_tree is None:
                 continue
 
             for node in mat.node_tree.nodes:
@@ -379,7 +379,7 @@ class OBJECT_OT_rename_textures_for_unreal(bpy.types.Operator):
         renamed_count = 0
 
         for mat in bpy.data.materials:
-            if not mat.use_nodes:
+            if mat.node_tree is None:
                 continue
 
             for node in mat.node_tree.nodes:
@@ -460,7 +460,7 @@ class OBJECT_OT_extract_textures_from_nodes(bpy.types.Operator):
         saved_count = 0
 
         for mat in bpy.data.materials:
-            if not mat.use_nodes:
+            if mat.node_tree is None:
                 continue
 
             for node in mat.node_tree.nodes:

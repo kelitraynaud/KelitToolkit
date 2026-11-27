@@ -20,6 +20,7 @@ from . import split_merge
 from . import auto_clean
 from . import sockets
 from . import auto_align
+from . import camera_names
 
 
 def register():
@@ -43,9 +44,11 @@ def register():
     usd_sync.register()
     ue_materials.register()
     sockets.register()
+    camera_names.register()
 
 
 def unregister():
+    camera_names.unregister()
     sockets.unregister()
     ue_materials.unregister()
     usd_sync.unregister()

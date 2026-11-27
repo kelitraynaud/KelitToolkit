@@ -23,6 +23,38 @@ def to_snake_case_keeping_prefix(name):
     return prefix + converted
 
 
+def rig_objects(scene):
+    """Names of what belongs to a rig: armatures, their bone shapes
+    (widgets), the targets of their bone constraints and drivers, and the
+    empties and widgets parented to them. Rigs find those by NAME (drivers,
+    scripts, pickers): renaming them breaks the rig."""
+    found = set()
+    for obj in scene.objects:
+        if obj.type != 'ARMATURE':
+            continue
+        found.add(obj.name)
+        if obj.pose is not None:
+            for bone in obj.pose.bones:
+                if bone.custom_shape is not None:
+                    found.add(bone.custom_shape.name)
+                for constraint in bone.constraints:
+                    for attr in ('target', 'pole_target'):
+                        target = getattr(constraint, attr, None)
+                        if target is not None:
+                            found.add(target.name)
+        anim = obj.animation_data
+        if anim is not None:
+            for driver in anim.drivers:
+                for variable in driver.driver.variables:
+                    for target in variable.targets:
+                        if isinstance(target.id, bpy.types.Object):
+                            found.add(target.id.name)
+        for child in obj.children_recursive:
+            if child.type != 'MESH' or child.parent_type == 'BONE':
+                found.add(child.name)
+    return found
+
+
 # ============================================================================
 # OPERATORS - NAMING
 # ============================================================================
@@ -32,6 +64,13 @@ class OBJECT_OT_normalize_names_quick(bpy.types.Operator):
     bl_idname = "kelit_toolkit.normalize_names_quick"
     bl_label = "Normalize Names (Quick)"
     bl_options = {'REGISTER', 'UNDO'}
+
+    skip_rigs: bpy.props.BoolProperty(
+        name="Skip Rigs",
+        description="Leave armatures, their widgets, constraint targets and control empties "
+                    "as they are: rig drivers and scripts find them by name",
+        default=True
+    )
 
     @classmethod
     def poll(cls, context):
@@ -48,8 +87,13 @@ class OBJECT_OT_normalize_names_quick(bpy.types.Operator):
         renamed_meshes = 0
         renamed_materials = 0
         skipped_linked = 0
+        rig = rig_objects(context.scene) if self.skip_rigs else set()
+        skipped_rig = 0
 
         for obj in selected_objs:
+            if obj.name in rig:
+                skipped_rig += 1
+                continue
             # library-linked datablocks cannot be renamed
             if obj.library is not None or obj.override_library is not None:
                 skipped_linked += 1
@@ -91,7 +135,11 @@ class OBJECT_OT_normalize_names_quick(bpy.types.Operator):
                             mat_slot.material.name = new_mat_name
                             renamed_materials += 1
 
-        self.report({'INFO'}, f"Normalized: {renamed_objects} object(s), {renamed_meshes} mesh(es), {renamed_materials} material(s)")
+        message = (f"Normalized: {renamed_objects} object(s), {renamed_meshes} mesh(es), "
+                   f"{renamed_materials} material(s)")
+        if skipped_rig:
+            message += f", {skipped_rig} rig object(s) left as is"
+        self.report({'INFO'}, message)
         return {'FINISHED'}
 
 
@@ -141,6 +189,13 @@ class OBJECT_OT_normalize_names_advanced(bpy.types.Operator):
         default=True
     )
 
+    skip_rigs: bpy.props.BoolProperty(
+        name="Skip Rigs",
+        description="Leave armatures, their widgets, constraint targets and control empties "
+                    "as they are: rig drivers and scripts find them by name",
+        default=True
+    )
+
     case_style: bpy.props.EnumProperty(
         name="Case Style",
         description="Naming convention style",
@@ -169,6 +224,7 @@ class OBJECT_OT_normalize_names_advanced(bpy.types.Operator):
         box.prop(self, "add_prefix")
         box.prop(self, "preserve_collision")
         box.prop(self, "preserve_lod")
+        box.prop(self, "skip_rigs")
 
     def execute(self, context):
         selected_objs = context.selected_objects
@@ -180,8 +236,13 @@ class OBJECT_OT_normalize_names_advanced(bpy.types.Operator):
         renamed_objects = 0
         renamed_meshes = 0
         renamed_materials = 0
+        rig = rig_objects(context.scene) if self.skip_rigs else set()
+        skipped_rig = 0
 
         for obj in selected_objs:
+            if obj.name in rig:
+                skipped_rig += 1
+                continue
             # Determine object type
             obj_type = 'MESH'
             if obj.type == 'LIGHT':
@@ -240,7 +301,11 @@ class OBJECT_OT_normalize_names_advanced(bpy.types.Operator):
                             mat_slot.material.name = new_mat_name
                             renamed_materials += 1
 
-        self.report({'INFO'}, f"Normalized: {renamed_objects} object(s), {renamed_meshes} mesh(es), {renamed_materials} material(s)")
+        message = (f"Normalized: {renamed_objects} object(s), {renamed_meshes} mesh(es), "
+                   f"{renamed_materials} material(s)")
+        if skipped_rig:
+            message += f", {skipped_rig} rig object(s) left as is"
+        self.report({'INFO'}, message)
         return {'FINISHED'}
 
 

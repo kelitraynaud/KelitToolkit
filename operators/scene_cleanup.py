@@ -17,6 +17,149 @@ ORGANIZATION_ITEMS = [
 ]
 
 
+def _object_pointers(struct, depth=0):
+    """(property, object) for every Object an RNA struct points at: the
+    target and pole of a constraint, the targets list of an Armature
+    constraint, the object of a Hook, Array offset, Curve, Lattice, Mirror,
+    Boolean, Shrinkwrap modifier, a Texture Coordinate node, ... read from
+    the RNA, so a new modifier type is covered too."""
+    for prop in struct.bl_rna.properties:
+        if prop.type == 'POINTER':
+            fixed = getattr(prop, 'fixed_type', None)
+            if fixed is None or fixed.identifier != 'Object':
+                continue
+            try:
+                value = getattr(struct, prop.identifier)
+            except Exception:
+                continue
+            if value is not None:
+                yield prop.identifier, value
+        elif prop.type == 'COLLECTION' and depth == 0 and prop.identifier not in {'rna_type'}:
+            try:
+                items = list(getattr(struct, prop.identifier))
+            except Exception:
+                continue
+            for item in items[:64]:
+                if isinstance(item, bpy.types.bpy_struct) and not isinstance(item, bpy.types.ID):
+                    yield from _object_pointers(item, depth + 1)
+
+
+def _tree_object_pointers(tree, seen):
+    """Objects a node tree points at (node settings and Object sockets),
+    node groups followed once."""
+    if tree is None or tree.as_pointer() in seen:
+        return
+    seen.add(tree.as_pointer())
+    for node in tree.nodes:
+        for _prop, value in _object_pointers(node, depth=1):
+            yield value
+        for socket in node.inputs:
+            value = getattr(socket, 'default_value', None)
+            if isinstance(value, bpy.types.Object):
+                yield value
+        group = getattr(node, 'node_tree', None)
+        if group is not None:
+            yield from _tree_object_pointers(group, seen)
+
+
+def _driver_object_targets(id_block):
+    anim = getattr(id_block, 'animation_data', None)
+    if anim is None:
+        return
+    for driver in anim.drivers:
+        for variable in driver.driver.variables:
+            for target in variable.targets:
+                if isinstance(target.id, bpy.types.Object):
+                    yield target.id
+
+
+def empty_references(scene):
+    """{empty name: why it is needed} for every empty something points at.
+    Deleting one of those breaks a rig, a deformation or an instance:
+    constraint targets (on objects and on pose bones, the hundreds of
+    targets of a character rig), bone shapes (widgets), modifier objects
+    (Hook, Array offset, Curve, Lattice, Mirror...), particle and Geometry
+    Nodes inputs, shader nodes, driver targets, camera focus, empties
+    parented to a bone, empties instancing a collection, members of a
+    collection that is instanced, and any other datablock Blender reports
+    as a user (bpy.data.user_map)."""
+    found = {}
+
+    def note(obj, reason):
+        if isinstance(obj, bpy.types.Object) and obj.type == 'EMPTY' and obj.name not in found:
+            found[obj.name] = reason
+
+    instanced_collections = set()
+    for obj in scene.objects:
+        label = f"'{obj.name}'"
+        for constraint in obj.constraints:
+            for _prop, target in _object_pointers(constraint):
+                note(target, f"constraint target of {label} ({constraint.name})")
+        for modifier in obj.modifiers:
+            for _prop, target in _object_pointers(modifier):
+                note(target, f"{modifier.type.lower()} modifier of {label}")
+            if modifier.type == 'NODES':
+                for key in modifier.keys():
+                    value = modifier.get(key)
+                    if isinstance(value, bpy.types.Object):
+                        note(value, f"geometry nodes input of {label}")
+                for target in _tree_object_pointers(modifier.node_group, set()):
+                    note(target, f"geometry nodes of {label}")
+        if obj.pose is not None:
+            for bone in obj.pose.bones:
+                if bone.custom_shape is not None:
+                    note(bone.custom_shape, f"bone shape of {label}:{bone.name}")
+                for constraint in bone.constraints:
+                    for _prop, target in _object_pointers(constraint):
+                        note(target, f"constraint target of bone {label}:{bone.name}")
+        for system in getattr(obj, 'particle_systems', []):
+            settings = system.settings
+            note(settings.instance_object, f"particles of {label}")
+            if settings.instance_collection is not None:
+                instanced_collections.add(settings.instance_collection)
+        if obj.type == 'EMPTY':
+            if obj.parent is not None and obj.parent_type == 'BONE':
+                note(obj, f"parented to bone {obj.parent.name}:{obj.parent_bone}")
+            if obj.instance_type == 'COLLECTION' and obj.instance_collection is not None:
+                note(obj, f"instances collection '{obj.instance_collection.name}'")
+                instanced_collections.add(obj.instance_collection)
+        if obj.type == 'CAMERA' and obj.data is not None:
+            note(obj.data.dof.focus_object, f"focus of camera {label}")
+        for source in (obj, obj.data, getattr(getattr(obj, 'data', None), 'shape_keys', None)):
+            if source is not None:
+                for target in _driver_object_targets(source):
+                    note(target, f"driver target of {label}")
+    for collection in instanced_collections:
+        for member in collection.all_objects:
+            note(member, f"member of instanced collection '{collection.name}'")
+    for material in bpy.data.materials:
+        for target in _tree_object_pointers(material.node_tree, set()):
+            note(target, f"shader of material '{material.name}'")
+        for target in _driver_object_targets(material):
+            note(target, f"driver target of material '{material.name}'")
+    for id_block in (scene, scene.world):
+        if id_block is not None:
+            for target in _driver_object_targets(id_block):
+                note(target, f"driver target of '{id_block.name}'")
+
+    # anything else Blender knows uses it (another scene, a light, text...)
+    remaining = {o for o in scene.objects if o.type == 'EMPTY' and o.name not in found}
+    if remaining:
+        try:
+            users = bpy.data.user_map(subset=remaining)
+        except Exception:
+            users = {}
+        for empty, owners in users.items():
+            for owner in owners:
+                if isinstance(owner, (bpy.types.Collection, bpy.types.Scene)):
+                    continue
+                if isinstance(owner, bpy.types.Object) and (owner.parent == empty or owner == empty):
+                    continue   # a child points at its parent: that is not a use
+                note(empty, f"used by {type(owner).__name__} '{owner.name}'")
+                break
+    return found
+
+
 # ============================================================================
 # OPERATORS - SCENE CLEANUP
 # ============================================================================
@@ -205,6 +348,14 @@ class OBJECT_OT_delete_unused_empties(bpy.types.Operator):
         default='PARENTS'
     )
 
+    dry_run: bpy.props.BoolProperty(
+        name="Dry Run (List Only)",
+        description="Change nothing: list in the report window what would be deleted "
+                    "and why each kept empty is needed",
+        default=False,
+        options={'SKIP_SAVE'}   # never remembered: a real run is the default
+    )
+
     # ------------------------------------------------------------------
     def _ancestors(self, obj):
         parent = obj.parent
@@ -254,19 +405,10 @@ class OBJECT_OT_delete_unused_empties(bpy.types.Operator):
                 if dof.focus_object is not None:
                     protect(dof.focus_object, f"DOF focus of camera '{obj.name}'")
 
-        # 2. anything referenced by a NON-empty object's constraints or drivers
-        driver_hits = set()
-        for obj in context.scene.objects:
-            if obj.type == 'EMPTY':
-                continue
-            for constraint in obj.constraints:
-                protect(getattr(constraint, 'target', None),
-                        f"constraint target of '{obj.name}'")
-            self._driver_targets(obj, driver_hits)
-            if obj.data is not None:
-                self._driver_targets(obj.data, driver_hits)
-        for name in driver_hits:
-            protect(bpy.data.objects.get(name), "driver target")
+        # 2. anything something points at: constraints (bones included),
+        # bone shapes, modifiers, drivers, instancing, Blender users
+        for name, reason in empty_references(context.scene).items():
+            protect(bpy.data.objects.get(name), reason)
 
         # 3. animated empties that drive real content below them
         for obj in context.scene.objects:
@@ -334,22 +476,54 @@ class OBJECT_OT_delete_unused_empties(bpy.types.Operator):
         layout.prop(self, "preserve_camera_rig")
         layout.prop(self, "process_all")
         layout.prop(self, "organization")
+        layout.prop(self, "dry_run")
 
-        candidates, structural, protected = self._candidates(context)
+        # scanned once per set of options, not on every redraw: the scan
+        # reads every constraint, modifier and driver of the scene
+        options = (self.preserve_camera_rig, self.process_all, self.organization)
+        cached = getattr(self, '_preview', None)
+        if cached is None or cached[0] != options:
+            cached = self._preview = (options, self._candidates(context))
+        candidates, structural, protected = cached[1]
         box = layout.box()
-        box.label(text=f"{len(candidates)} empty(ies) will be deleted", icon='TRASH')
+        verb = "would be" if self.dry_run else "will be"
+        box.label(text=f"{len(candidates)} empty(ies) {verb} deleted", icon='TRASH')
         if structural:
             box.label(text=f"{len(structural)} parent empty(ies) kept, transforms pushed down",
                       icon='OUTLINER_OB_EMPTY')
-        box.label(text=f"{len(protected)} kept (rig / animation)", icon='LOCKED')
+        box.label(text=f"{len(protected)} kept (referenced by a rig, a modifier, a driver...)",
+                  icon='LOCKED')
         for name in list(protected)[:4]:
             box.label(text=f"   kept: {name} - {protected[name]}")
 
+    def _write_report(self, context, names, structural, protected, done):
+        """The deleted (or, in a dry run, deletable) empties, then every kept
+        one with what needs it."""
+        from .report import set_report
+        verb = "Deleted" if done else "Would delete"
+        lines = [('INFO', f"{verb} {len(names)} empty(ies); {len(protected)} kept because "
+                          f"something uses them; {len(structural)} parent(s) kept")]
+        # after a real deletion the names point at nothing: no object link
+        lines += [('WARNING', f"{verb}: {name}", '' if done else name) for name in sorted(names)]
+        lines += [('INFO', f"Kept {name}: {reason}", name)
+                  for name, reason in sorted(protected.items())]
+        set_report(context, "Delete Unused Empties", lines)
+
     def execute(self, context):
+        self._preview = None
         candidates, structural, protected = self._candidates(context)
+        if self.dry_run:
+            from .report import open_report
+            self._write_report(context, [o.name for o in candidates], structural, protected,
+                               done=False)
+            open_report(context)
+            self.report({'INFO'}, f"Dry run: {len(candidates)} empty(ies) would be deleted, "
+                                  f"{len(protected)} kept as referenced. Nothing changed")
+            return {'CANCELLED'}
         if not candidates and not structural:
             self.report({'INFO'}, "No unused empty found")
             return {'CANCELLED'}
+        deleted_names = [o.name for o in candidates]
 
         if structural:
             self._push_transforms_down(structural)
@@ -383,7 +557,8 @@ class OBJECT_OT_delete_unused_empties(bpy.types.Operator):
         if structural:
             message += f", {len(structural)} parent empty(ies) kept"
         if protected:
-            message += f", kept {len(protected)} (camera rig / animation)"
+            message += f", kept {len(protected)} in use (see Show Last Report)"
+        self._write_report(context, deleted_names, structural, protected, done=True)
         self.report({'INFO'}, message)
         return {'FINISHED'}
 

@@ -54,7 +54,7 @@ def collect_validation_issues(objects):
         else:
             # Check if materials have textures
             for mat in obj.data.materials:
-                if mat and mat.use_nodes:
+                if mat and mat.node_tree is not None:
                     has_textures = any(node.type == 'TEX_IMAGE' for node in mat.node_tree.nodes)
                     if not has_textures:
                         warnings.append(f"[i] {obj.name}: Material '{mat.name}' without textures")

@@ -90,7 +90,7 @@ class OBJECT_OT_auto_setup_pbr_textures(bpy.types.Operator):
                 is_new = material.name not in existing_mat_names
 
                 # Check if material needs setup
-                needs_setup = not material.use_nodes or len([n for n in material.node_tree.nodes if n.type == 'TEX_IMAGE']) == 0
+                needs_setup = material.node_tree is None or len([n for n in material.node_tree.nodes if n.type == 'TEX_IMAGE']) == 0
 
                 if needs_setup:
                     self.setup_pbr_nodes(material, textures)
@@ -162,7 +162,7 @@ class OBJECT_OT_auto_setup_pbr_textures(bpy.types.Operator):
         for mat in bpy.data.materials:
             if mat_name.lower() == mat.name.lower() or mat_name.lower() in mat.name.lower():
                 if self.replace_empty_materials:
-                    if mat.use_nodes:
+                    if mat.node_tree is not None:
                         has_textures = any(node.type == 'TEX_IMAGE' for node in mat.node_tree.nodes)
                         if not has_textures:
                             existing_mat = mat
@@ -175,7 +175,6 @@ class OBJECT_OT_auto_setup_pbr_textures(bpy.types.Operator):
             return existing_mat
         elif self.create_new_materials:
             mat = bpy.data.materials.new(name=mat_name)
-            mat.use_nodes = True
             return mat
 
         return None
@@ -384,7 +383,7 @@ class OBJECT_OT_auto_setup_pbr_textures(bpy.types.Operator):
             has_empty_material = False
             if len(obj.data.materials) > 0 and obj.data.materials[0]:
                 mat = obj.data.materials[0]
-                if mat.use_nodes:
+                if mat.node_tree is not None:
                     has_textures = any(node.type == 'TEX_IMAGE' for node in mat.node_tree.nodes)
                     has_empty_material = not has_textures
 

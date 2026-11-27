@@ -7,7 +7,7 @@ import mathutils
 from ..utils import mesh_users, normalize_name_for_unreal
 from .export import collect_validation_issues
 from .instances import OBJECT_OT_detect_and_replace_instances
-from .materials import find_duplicate_materials
+from .materials import safe_material_groups
 from .report import set_report, validation_lines
 from .scene_cleanup import OBJECT_OT_delete_unused_empties, ORGANIZATION_ITEMS
 from .split_merge import analyse_repeats, split_groups
@@ -126,7 +126,7 @@ def compute_preview(context, pool, origin_preset, organization='PARENTS'):
         'repeats': repeats,
         'objects': len(pool),
         'hidden': sum(1 for obj in context.scene.objects if not obj.visible_get()),
-        'materials': sum(len(group) - 1 for group in find_duplicate_materials()),
+        'materials': sum(len(group) - 1 for group in safe_material_groups()[0]),
         'empties': len(empties),
         'empties_kept': len(protected) + structural,
         'duplicates': sum(len(objs) - 1 for objs in groups.values()),
@@ -351,7 +351,7 @@ class OBJECT_OT_auto_clean(bpy.types.Operator):
                     bpy.ops.kelit_toolkit.delete_unused_empties(
                         'EXEC_DEFAULT', preserve_camera_rig=True,
                         process_all=(self.scope == 'SCENE'),
-                        organization=self.organization)
+                        organization=self.organization, dry_run=False)
                 line = f"Unused empties deleted: {before - len(context.scene.objects)}"
                 if self.organization == 'COLLECTIONS':
                     line += f", {len(bpy.data.collections) - collections_before} collection(s) created"

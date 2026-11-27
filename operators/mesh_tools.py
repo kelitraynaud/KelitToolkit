@@ -187,7 +187,6 @@ class OBJECT_OT_create_collision_mesh(bpy.types.Operator):
             mat = bpy.data.materials.get("Collision_Material")
             if mat is None:
                 mat = bpy.data.materials.new(name="Collision_Material")
-                mat.use_nodes = True
                 # blend_method is deprecated in Blender 5.x in favour of
                 # surface_render_method - support both while they coexist
                 if hasattr(mat, 'surface_render_method'):
@@ -413,7 +412,6 @@ class OBJECT_OT_convert_to_low_poly(bpy.types.Operator):
         if material is not None:
             bpy.data.materials.remove(material)
         material = bpy.data.materials.new(f"M_{base_name}_LP")
-        material.use_nodes = True
         nodes = material.node_tree.nodes
         links = material.node_tree.links
         principled = next(n for n in nodes if n.type == 'BSDF_PRINCIPLED')

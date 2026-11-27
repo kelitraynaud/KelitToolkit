@@ -6,6 +6,7 @@ scenes); the result opens in the report window."""
 import bpy
 
 from .report import open_report, set_report
+from ..utils import FolderIndex
 
 
 def renderable_collections(view_layer):
@@ -71,6 +72,46 @@ class WeightCounter:
         self.mesh_cache = {}
         self.collection_cache = {}
         self.evaluated = 0
+        self.sources_cache = {}
+
+    def geometry_key(self, obj):
+        """What a renderer stores once: the mesh data when nothing modifies
+        it (every object sharing it points at one copy), the object itself
+        otherwise."""
+        if obj.type == 'MESH' and obj.data is not None and not any(
+                m.show_render for m in obj.modifiers):
+            return obj.data.name_full
+        return obj.name_full
+
+    def instanced_sources(self, obj, depth=0):
+        """{geometry key: triangles} of every source an instancer points at
+        (collection instances, particles in Object or Collection mode),
+        each source once however many copies render: 8 145 grass tufts of
+        one 17 000-triangle source are 17 000 triangles of memory."""
+        key = obj.name_full
+        if key in self.sources_cache:
+            return self.sources_cache[key]
+        self.sources_cache[key] = {}   # guards against recursive instancing
+        found = {}
+        if depth < 8:
+            members = []
+            if obj.instance_type == 'COLLECTION' and obj.instance_collection is not None:
+                members.extend(obj.instance_collection.all_objects)
+            for system in getattr(obj, 'particle_systems', []):
+                settings = system.settings
+                if settings.render_type == 'OBJECT' and settings.instance_object is not None:
+                    members.append(settings.instance_object)
+                elif settings.render_type == 'COLLECTION' and settings.instance_collection is not None:
+                    members.extend(settings.instance_collection.all_objects)
+            for member in members:
+                if member.hide_render:
+                    continue
+                own = self.object_triangles(member)[0]
+                if own:
+                    found[self.geometry_key(member)] = own
+                found.update(self.instanced_sources(member, depth + 1))
+        self.sources_cache[key] = found
+        return found
 
     def base_counts(self, mesh):
         """(triangles, face corners) of the mesh as stored."""
@@ -227,11 +268,11 @@ def _jpeg_header(head):
     return None
 
 
-def header_size(image, max_bytes=1 << 18):
+def header_size(image, max_bytes=1 << 18, folders=None):
     """(width, height, is_float) read from the PNG or JPEG header of an
     image that is not loaded, without decoding it. None when the format is
-    another one or the header cannot be read: the caller then loads it."""
-    import os
+    another one or the header cannot be read: the caller then loads it.
+    An empty tuple when the file is missing. `folders` (a FolderIndex) checks the file exists one folder at a time."""
     if image.source != 'FILE':
         return None
     try:
@@ -239,8 +280,8 @@ def header_size(image, max_bytes=1 << 18):
             head = bytes(image.packed_file.data[:max_bytes])
         else:
             path = bpy.path.abspath(image.filepath_raw or image.filepath, library=image.library)
-            if not path or not os.path.isfile(path):
-                return None
+            if not path or (folders or FolderIndex()).size(path) is None:
+                return ()   # missing: loading it would only search again
             with open(path, 'rb') as handle:
                 head = handle.read(max_bytes)
     except Exception:
@@ -258,11 +299,14 @@ def texture_weights(min_users=1):
     formats have to be loaded to read their size: the slow part of the
     report."""
     rows = []
+    folders = FolderIndex()
     for image in bpy.data.images:
         if image.type in {'RENDER_RESULT', 'COMPOSITING'} or image.users < min_users:
             continue
-        found = None if image.has_data else header_size(image)
+        found = None if image.has_data else header_size(image, folders=folders)
         if found is not None:
+            if not found:
+                continue   # file missing: nothing to load, nothing to weigh
             width, height, is_float = found
             memory = width * height * 4 * (4 if is_float else 1)
             rows.append((image.name, memory, width, height, image.users))
@@ -278,15 +322,22 @@ def texture_weights(min_users=1):
     return sorted(rows, key=lambda row: row[1], reverse=True)
 
 
-def compute_scene_weight(context, top=20):
-    """Everything the report shows, as plain data (testable)."""
+def compute_scene_weight(context, top=20, progress=None):
+    """Everything the report shows, as plain data (testable).
+
+    displayed: every triangle the render sees, instances included (what the
+    viewport draws and the BVH holds). instanced: the part of it coming from
+    collection instances and particles. unique: the geometry really stored,
+    each mesh and each instanced source counted once.
+    `progress(done, total)` is called while the objects are measured."""
     collections = renderable_collections(context.view_layer)
     counter = WeightCounter(context)
     rows = []
     unique_by_data = {}
-    for obj in context.scene.objects:
-        if not is_rendered(obj, collections):
-            continue
+    objects = [obj for obj in context.scene.objects if is_rendered(obj, collections)]
+    for index, obj in enumerate(objects):
+        if progress is not None and index % 50 == 0:
+            progress(index, len(objects))
         own, estimated = counter.object_triangles(obj)
         instanced = counter.instanced_triangles(obj)
         total = own + instanced
@@ -294,16 +345,16 @@ def compute_scene_weight(context, top=20):
             continue
         collection = obj.users_collection[0].name if obj.users_collection else ''
         rows.append({'name': obj.name, 'collection': collection, 'triangles': total,
-                     'estimated': estimated, 'data': obj.data.name_full if obj.data else None})
-        if obj.type == 'MESH' and obj.data is not None and not any(
-                m.show_render for m in obj.modifiers):
+                     'instanced': instanced, 'estimated': estimated,
+                     'data': obj.data.name_full if obj.data else None})
+        if own:
             # same mesh data, no modifier: a renderer loads it only once
-            unique_by_data[obj.data.name_full] = own
-            unique_by_data[obj.name_full + '#inst'] = instanced
-        else:
-            unique_by_data[obj.name_full] = total
+            unique_by_data[counter.geometry_key(obj)] = own
+        if instanced:
+            unique_by_data.update(counter.instanced_sources(obj))
     rows.sort(key=lambda row: row['triangles'], reverse=True)
     displayed = sum(row['triangles'] for row in rows)
+    instanced_total = sum(row['instanced'] for row in rows)
     unique = sum(unique_by_data.values())
 
     shared = {}
@@ -314,9 +365,9 @@ def compute_scene_weight(context, top=20):
         ((data, members) for data, members in shared.items() if len(members) > 1),
         key=lambda item: sum(r['triangles'] for r in item[1]), reverse=True)
 
-    rendered = [obj for obj in context.scene.objects if is_rendered(obj, collections)]
-    return {'heavy_subdivisions': heavy_subdivisions(rendered),
+    return {'heavy_subdivisions': heavy_subdivisions(objects),
             'rows': rows, 'top': rows[:top], 'displayed': displayed, 'unique': unique,
+            'instanced': instanced_total,
             'shared': shared_rows, 'textures': texture_weights(),
             'evaluated': counter.evaluated, 'rendered_objects': len(rows)}
 
@@ -340,15 +391,27 @@ class OBJECT_OT_scene_weight_report(bpy.types.Operator):
     def execute(self, context):
         import time
         start = time.time()
-        data = compute_scene_weight(context, self.top)
+        wm = context.window_manager
+        wm.progress_begin(0, 100)
+        try:
+            data = compute_scene_weight(
+                context, self.top,
+                progress=lambda done, total: wm.progress_update(int(90 * done / max(total, 1))))
+        finally:
+            wm.progress_end()
         elapsed = time.time() - start
         displayed = max(data['displayed'], 1)
 
         lines = [('INFO', f"Rendered: {_mtris(data['displayed'])}tris on "
-                          f"{data['rendered_objects']} object(s), {_mtris(data['unique'])}tris "
-                          "unique (shared meshes loaded once)")]
+                          f"{data['rendered_objects']} object(s): "
+                          f"{_mtris(data['displayed'] - data['instanced'])}tris of objects + "
+                          f"{_mtris(data['instanced'])}tris of instances (viewport / BVH cost)"),
+                 ('INFO', f"Unique geometry in memory: {_mtris(data['unique'])}tris "
+                          "(shared meshes and instanced sources counted once)")]
         for row in data['top']:
             flag = '' if row['estimated'] else ' (evaluated)'
+            if row['instanced']:
+                flag += f" ({_mtris(row['instanced'])}tris instanced)"
             lines.append(('WARNING' if row['triangles'] / displayed > 0.05 else 'INFO',
                           f"{row['name']}  [{row['collection']}]  {_mtris(row['triangles'])}tris  "
                           f"{100.0 * row['triangles'] / displayed:.1f} %{flag}", row['name']))
@@ -371,7 +434,8 @@ class OBJECT_OT_scene_weight_report(bpy.types.Operator):
         set_report(context, "Scene Weight", lines)
         open_report(context)
         self.report({'INFO'}, f"{_mtris(data['displayed'])}tris rendered "
-                              f"({_mtris(data['unique'])}tris unique), "
+                              f"({_mtris(data['instanced'])}tris instanced, "
+                              f"{_mtris(data['unique'])}tris unique), "
                               f"{_mem(texture_total)} of textures, {elapsed:.1f} s")
         return {'FINISHED'}
 

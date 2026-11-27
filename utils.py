@@ -256,6 +256,37 @@ _MAX_STRUCT_DEPTH = 8
 _PACKED_HASHES = {}
 
 
+class FolderIndex:
+    """File sizes read one folder at a time. On a network drive (Y:, Z:,
+    Frame.io) each os.path.isfile costs a round trip: a thousand textures in
+    twenty folders are twenty listings instead of a thousand checks. Keep one
+    instance for one operation (the listing is not refreshed)."""
+
+    def __init__(self):
+        self.folders = {}
+
+    def size(self, path):
+        """Size in bytes of the file at `path`, None when it is missing."""
+        import os
+        folder, name = os.path.split(os.path.normpath(path))
+        key = os.path.normcase(folder)
+        listing = self.folders.get(key)
+        if listing is None:
+            listing = {}
+            try:
+                with os.scandir(folder) as entries:
+                    for entry in entries:
+                        try:
+                            if entry.is_file():
+                                listing[os.path.normcase(entry.name)] = entry.stat().st_size
+                        except OSError:
+                            continue
+            except OSError:
+                pass   # missing or unreadable folder: every file in it is missing
+            self.folders[key] = listing
+        return listing.get(os.path.normcase(name))
+
+
 def _is_cosmetic(identifier, nested=False):
     if identifier.startswith('show_') or identifier.startswith('bl_'):
         return True
@@ -412,22 +443,65 @@ def _tree_fingerprint(tree, context):
     return result
 
 
-def material_fingerprint(material):
+def material_fingerprint(material, shared=None):
     """Hashable description of what a material LOOKS like: every node with
     all its settings (operations, blend modes, ramps, curves, node groups),
     the images it reads (by file path or packed content), socket values,
     links, surface settings. Two materials with the same fingerprint render
     the same whatever their names (imports keep creating rooftop_01,
-    rooftop_01.001, ... copies of one material)."""
+    rooftop_01.001, ... copies of one material). Pass the same `shared`
+    context (_new_context) to fingerprint many materials: node groups they
+    share are then read once."""
     if material is None:
         return None
     surface = tuple((name, _plain_value(getattr(material, name, None)))
                     for name in _MATERIAL_SETTINGS)
     tree = getattr(material, 'node_tree', None)
+    # drivers and keys belong to what a material is: the four head shaders
+    # of four copies of a rig look alike but each is driven by ITS rig
+    animation = (animation_fingerprint(material), animation_fingerprint(tree))
     if tree is None or not tree.nodes:
         return ('flat', tuple(round(c, 4) for c in material.diffuse_color),
-                round(material.roughness, 4), round(material.metallic, 4), surface)
-    return ('nodes', _tree_fingerprint(tree, _new_context()), surface)
+                round(material.roughness, 4), round(material.metallic, 4), surface, animation)
+    return ('nodes', _tree_fingerprint(tree, shared or _new_context()), surface, animation)
+
+
+def _id_reference(datablock):
+    if datablock is None:
+        return None
+    return (type(datablock).__name__, datablock.name_full,
+            datablock.library.filepath if datablock.library else '')
+
+
+def animation_fingerprint(id_block):
+    """Drivers (path, expression, every variable with the IDs and bones it
+    reads) and the action of a datablock, None when it has neither. Two
+    drivers reading different objects are different."""
+    anim = getattr(id_block, 'animation_data', None)
+    if anim is None:
+        return None
+    drivers = []
+    for fcurve in anim.drivers:
+        driver = fcurve.driver
+        variables = tuple(
+            (variable.name, variable.type, tuple(
+                (_id_reference(target.id), target.data_path,
+                 getattr(target, 'bone_target', ''), getattr(target, 'transform_type', ''),
+                 getattr(target, 'transform_space', ''), getattr(target, 'rotation_mode', ''))
+                for target in variable.targets))
+            for variable in driver.variables)
+        drivers.append((fcurve.data_path, fcurve.array_index, driver.type,
+                        driver.expression, variables))
+    action = _id_reference(anim.action)
+    if not drivers and action is None:
+        return None
+    return (tuple(sorted(drivers, key=repr)), action)
+
+
+def is_animated(id_block):
+    """True when a datablock carries drivers or an action."""
+    anim = getattr(id_block, 'animation_data', None)
+    return anim is not None and (anim.action is not None or len(anim.drivers) > 0)
 
 
 # ---------------------------------------------------------------------------

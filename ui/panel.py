@@ -23,6 +23,9 @@ from ..operators.origin import (
     OBJECT_OT_set_origin_custom,
     OBJECT_OT_set_origin_with_modifier_compensation,
 )
+from ..operators.camera_names import (
+    OBJECT_OT_rename_cameras,
+)
 from ..operators.naming import (
     OBJECT_OT_normalize_names_quick,
     OBJECT_OT_normalize_names_advanced,
@@ -137,6 +140,7 @@ from ..operators import (
     ai_optimize as _m_ai_optimize,
     auto_align as _m_auto_align,
     sockets as _m_sockets,
+    camera_names as _m_camera_names,
     split_merge as _m_split_merge,
 )
 
@@ -156,6 +160,7 @@ SEARCH_SECTIONS = (
     (_m_origin, 'Prepare · Origin'),
     (_m_mesh_tools, 'Prepare · Mesh'),
     (_m_naming, 'Clean · Naming'),
+    (_m_camera_names, 'Clean · Naming'),
     (_m_materials, 'Clean · Materials'),
     (_m_material_conversion, 'Clean · Materials'),
     (_m_textures, 'Clean · Materials'),
@@ -424,6 +429,8 @@ class VIEW3D_PT_unreal_toolkit(bpy.types.Panel):
                      text="Normalize (Advanced)", icon='PREFERENCES')
         col.operator(OBJECT_OT_batch_find_replace.bl_idname,
                      text="Find & Replace", icon='ZOOM_IN')
+        col.operator(OBJECT_OT_rename_cameras.bl_idname,
+                     text="Rename Cameras", icon='OUTLINER_OB_CAMERA')
         col.operator(OBJECT_OT_clean_object_names.bl_idname,
                      text="Clean Suffixes", icon='BRUSH_DATA')
         col.operator(OBJECT_OT_set_mesh_name_from_object.bl_idname,

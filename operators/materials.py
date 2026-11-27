@@ -1,6 +1,55 @@
 import bpy
 from collections import defaultdict
-from ..utils import clean_name, material_fingerprint
+from ..utils import FolderIndex, clean_name, is_animated, material_fingerprint
+
+
+class Progress:
+    """wm.progress_begin / update / end around a long scan, safe without a
+    window (background, tests)."""
+
+    def __init__(self, context, total):
+        self.wm = getattr(context, 'window_manager', None) if context else None
+        self.total = max(total, 1)
+        if self.wm is not None:
+            self.wm.progress_begin(0, 100)
+
+    def update(self, done):
+        if self.wm is not None and done % 25 == 0:
+            self.wm.progress_update(int(100 * done / self.total))
+
+    def end(self):
+        if self.wm is not None:
+            self.wm.progress_end()
+            self.wm = None
+
+
+# A scan done for a dialog (invoke, then every redraw of draw) is reused by
+# draw and execute: recomputing 1 200 material fingerprints or hashing
+# network files on each redraw froze Blender for minutes. Only for a few
+# minutes, and only while the same datablocks are there.
+_SCANS = {}
+SCAN_LIFETIME = 300.0
+
+
+def _scan_signature(collection):
+    return (len(collection), hash(tuple(d.name_full for d in collection)))
+
+
+def remember_scan(kind, collection, value):
+    import time
+    _SCANS[kind] = (time.time(), _scan_signature(collection), value)
+
+
+def recall_scan(kind, collection, consume=False):
+    import time
+    entry = _SCANS.pop(kind, None) if consume else _SCANS.get(kind)
+    if entry is None:
+        return None
+    stamp, signature, value = entry
+    if time.time() - stamp > SCAN_LIFETIME or signature != _scan_signature(collection):
+        _SCANS.pop(kind, None)
+        return None
+    return value
 
 
 def viewports_to_solid(context):
@@ -43,17 +92,158 @@ def remove_datablocks(datablocks):
         bpy.data.batch_remove(datablocks)
 
 
-def find_duplicate_materials():
+# ----------------------------------------------------------------------------
+# References a merge must not rewrite. user_remap rewrites EVERY pointer to a
+# copy: material slots, but also a rig's custom properties (a Character DNA
+# empty listing 7 601 driver owners) or another datablock's drivers. Those
+# copies stay, and the report says why.
+# ----------------------------------------------------------------------------
+
+def _holds(value, target, depth=0):
+    """True when an ID property value (group, list, nested) points at `target`."""
+    if isinstance(value, bpy.types.ID):
+        return value == target
+    if depth > 8 or value is None or isinstance(value, (str, bytes, int, float, bool)):
+        return False
+    if hasattr(value, 'keys') and hasattr(value, 'get'):
+        return any(_holds(value.get(key), target, depth + 1) for key in value.keys())
+    if isinstance(value, (list, tuple)) or type(value).__name__ == 'IDPropertyGroupViewItems':
+        return any(_holds(item, target, depth + 1) for item in value)
+    try:
+        items = list(value)
+    except TypeError:
+        return False
+    if items and not isinstance(items[0], (int, float, bool)):
+        return any(_holds(item, target, depth + 1) for item in items)
+    return False
+
+
+def _custom_property_holds(id_block, target):
+    try:
+        keys = list(id_block.keys())
+    except Exception:
+        return False
+    return any(_holds(id_block.get(key), target) for key in keys)
+
+
+def _driver_reads(id_block, target):
+    anim = getattr(id_block, 'animation_data', None)
+    if anim is None:
+        return False
+    return any(t.id == target for fcurve in anim.drivers
+               for variable in fcurve.driver.variables for t in variable.targets)
+
+
+def foreign_references(datablocks, plain_users, slot_check=None):
+    """{name: reason} for the datablocks something points at otherwise than
+    through plain use: a custom property, a driver of another datablock, a
+    user of a type not in `plain_users`, an object that holds it outside its
+    material slots (`slot_check(object, datablock)` says whether it is a
+    plain use)."""
+    found = {}
+    if not datablocks:
+        return found
+    try:
+        users = bpy.data.user_map(subset=set(datablocks))
+    except Exception:
+        return {db.name: "users could not be checked" for db in datablocks}
+    for datablock, owners in users.items():
+        for owner in owners:
+            if owner == datablock:
+                continue
+            label = f"{type(owner).__name__} '{owner.name}'"
+            reason = None
+            if _custom_property_holds(owner, datablock):
+                reason = f"custom property of {label}"
+            elif _driver_reads(owner, datablock):
+                reason = f"driver of {label}"
+            elif not isinstance(owner, plain_users):
+                reason = f"used by {label}"
+            elif (slot_check is not None and isinstance(owner, bpy.types.Object)
+                  and not slot_check(owner, datablock)):
+                reason = f"referenced by {label} outside its material slots"
+            if reason:
+                found[datablock.name] = reason
+                break
+    return found
+
+
+PLAIN_MATERIAL_USERS = (bpy.types.Mesh, bpy.types.Curve, bpy.types.MetaBall, bpy.types.Object)
+PLAIN_IMAGE_USERS = (bpy.types.Material, bpy.types.NodeTree, bpy.types.World, bpy.types.Texture,
+                     bpy.types.Light, bpy.types.Brush, bpy.types.Object, bpy.types.Camera,
+                     bpy.types.Screen, bpy.types.Scene, bpy.types.WindowManager)
+
+
+def _in_slots(obj, material):
+    return any(slot.material == material for slot in obj.material_slots)
+
+
+def _split_blocked(groups, pick, plain_users, slot_check=None):
+    """Removes from each group the copies something else points at.
+    Returns (groups still worth merging, {name: reason})."""
+    copies = [d for group in groups for d in group if d != pick(group)]
+    blocked = foreign_references(copies, plain_users, slot_check)
+    kept = []
+    for group in groups:
+        keep = pick(group)
+        remaining = [d for d in group if d == keep or d.name not in blocked]
+        if len(remaining) > 1:
+            kept.append(remaining)
+    return kept, blocked
+
+
+def find_duplicate_materials(context=None, include_animated=False, skipped=None):
     """Groups of local materials that look the same (same images, values,
-    links and surface settings), whatever their names."""
+    links, surface settings, drivers and keys), whatever their names. Node
+    groups shared by many materials are fingerprinted once. Materials with
+    drivers or keys are left out unless `include_animated` (a list as
+    `skipped` collects them). With a context, the progress shows in the
+    status bar."""
     groups = defaultdict(list)
-    for material in bpy.data.materials:
-        if material.library is not None or getattr(material, 'is_grease_pencil', False):
-            continue
-        key = material_fingerprint(material)
-        if key is not None:
-            groups[key].append(material)
+    shared = {'trees': {}, 'stack': set(), 'structs': set()}
+    materials = list(bpy.data.materials)
+    progress = Progress(context, len(materials))
+    try:
+        for index, material in enumerate(materials):
+            progress.update(index)
+            if material.library is not None or getattr(material, 'is_grease_pencil', False):
+                continue
+            if not include_animated and (is_animated(material)
+                                         or is_animated(getattr(material, 'node_tree', None))):
+                if skipped is not None:
+                    skipped.append(material)
+                continue
+            key = material_fingerprint(material, shared)
+            if key is not None:
+                groups[key].append(material)
+    finally:
+        progress.end()
     return [group for group in groups.values() if len(group) > 1]
+
+
+def safe_material_groups(context=None, include_animated=False):
+    """(groups to merge, animated materials left out, {copy: why it stays})."""
+    animated = []
+    groups = find_duplicate_materials(context, include_animated, animated)
+    groups, blocked = _split_blocked(groups, pick_material_to_keep, PLAIN_MATERIAL_USERS,
+                                     _in_slots)
+    return groups, animated, blocked
+
+
+def _scanned_material_groups(context, include_animated=False, consume=False):
+    """(groups, animated, blocked) found by the dialog, or a fresh scan."""
+    kind = f'materials:{include_animated}'
+    found = recall_scan(kind, bpy.data.materials, consume)
+    if found is not None:
+        names, animated_names, blocked = found
+        groups = [[bpy.data.materials.get(n) for n in group] for group in names]
+        if all(m is not None for group in groups for m in group):
+            return groups, [bpy.data.materials.get(n) for n in animated_names], blocked
+    groups, animated, blocked = safe_material_groups(context, include_animated)
+    if not consume:
+        remember_scan(kind, bpy.data.materials,
+                      ([[m.name for m in g] for g in groups], [m.name for m in animated], blocked))
+    return groups, animated, blocked
 
 
 def pick_material_to_keep(group):
@@ -209,15 +399,33 @@ class OBJECT_OT_merge_duplicate_materials(bpy.types.Operator):
     bl_label = "Merge Duplicate Materials"
     bl_options = {'REGISTER', 'UNDO'}
 
+    include_animated: bpy.props.BoolProperty(
+        name="Include Animated/Driven Materials",
+        description="Also merge materials that carry drivers or keys. Off by default: "
+                    "a rig's shaders are driven by THAT rig, merging them hands one "
+                    "character's face to another rig",
+        default=False,
+    )
+
     def invoke(self, context, event):
-        if not find_duplicate_materials():
+        for kind in [k for k in _SCANS if k.startswith('materials')]:
+            _SCANS.pop(kind, None)
+        groups, animated, blocked = _scanned_material_groups(context, self.include_animated)
+        if not groups and not animated and not blocked:
             self.report({'INFO'}, "No duplicate materials found")
             return {'CANCELLED'}
-        return context.window_manager.invoke_props_dialog(self, width=420)
+        return context.window_manager.invoke_props_dialog(self, width=460)
 
-    def draw(self, _context):
+    def draw(self, context):
         layout = self.layout
-        groups = find_duplicate_materials()
+        groups, animated, blocked = _scanned_material_groups(context, self.include_animated)
+        layout.prop(self, "include_animated")
+        if animated and not self.include_animated:
+            layout.label(text=f"{len(animated)} animated or driven material(s) left out",
+                         icon='DRIVER')
+        if blocked:
+            layout.label(text=f"{len(blocked)} copy(ies) kept: referenced by a custom "
+                              "property or a driver", icon='LOCKED')
         removed = sum(len(group) - 1 for group in groups)
         layout.label(text=f"{removed} material(s) will be merged into {len(groups)}", icon='INFO')
         box = layout.box()
@@ -229,9 +437,18 @@ class OBJECT_OT_merge_duplicate_materials(bpy.types.Operator):
         layout.label(text="Applies to every object of the file. The copies are deleted.")
 
     def execute(self, _context):
-        groups = find_duplicate_materials()
+        from .report import set_report
+        groups, animated, blocked = _scanned_material_groups(
+            _context, self.include_animated, consume=True)
+        lines = [('WARNING', f"Kept {name}: {reason}") for name, reason in sorted(blocked.items())]
+        if animated and not self.include_animated:
+            lines += [('INFO', f"Left out {m.name}: drivers or keys") for m in animated]
+        if lines:
+            set_report(_context, "Merge Duplicate Materials", lines)
         if not groups:
-            self.report({'INFO'}, "No duplicate materials found")
+            self.report({'INFO'}, "No duplicate materials found" + (
+                f" ({len(blocked)} referenced copy(ies) kept, see Show Last Report)"
+                if blocked else ""))
             return {'CANCELLED'}
 
         restore_viewports = viewports_to_solid(_context)
@@ -254,8 +471,12 @@ class OBJECT_OT_merge_duplicate_materials(bpy.types.Operator):
         finally:
             restore_viewports()
 
-        self.report({'INFO'}, f"{merged} duplicate material(s) merged into {len(groups)}, "
-                              f"{len(bpy.data.materials)} material(s) remaining")
+        message = (f"{merged} duplicate material(s) merged into {len(groups)}, "
+                   f"{len(bpy.data.materials)} material(s) remaining")
+        if blocked or (animated and not self.include_animated):
+            message += (f"; {len(blocked)} referenced copy(ies) kept, {len(animated)} "
+                        "animated left out (see Show Last Report)")
+        self.report({'INFO'}, message)
         return {'FINISHED'}
 
 
@@ -291,19 +512,48 @@ def _has_unsaved_pixels(image):
         return False
 
 
-def find_duplicate_images(skipped=None):
+def find_duplicate_images(skipped=None, context=None):
     """Groups of images with identical content. Packed images are compared by
     their packed bytes, file images by size then a full-file md5. The colour
     space and alpha mode are part of the key: the same file read as sRGB and
     as Non-Color is two different images. Linked, tiled and render/viewer
     images are left alone. Generated images and images with unsaved painting
     (is_dirty) are never merged: their pixels are not what is on disk. Pass a
-    list as `skipped` to collect those."""
-    import hashlib
+    list as `skipped` to collect those. File existence and sizes are read one
+    folder at a time (network drives); with a context, the progress shows
+    in the status bar."""
     import os
     candidates = []
     by_size = defaultdict(list)
-    for image in bpy.data.images:
+    images = list(bpy.data.images)
+    progress = Progress(context, len(images))
+    try:
+        _sort_images(images, skipped, candidates, by_size, FolderIndex(), progress)
+        for entries in by_size.values():
+            if len(entries) < 2:
+                continue   # a size nothing else shares: no need to hash it
+            hashes = {}
+            for path, settings, image in entries:
+                key = os.path.normcase(os.path.abspath(path))
+                if key not in hashes:
+                    try:
+                        hashes[key] = _file_md5(path)
+                    except OSError:
+                        continue
+                candidates.append((('file', hashes[key]) + settings, image))
+    finally:
+        progress.end()
+    groups = defaultdict(list)
+    for key, image in candidates:
+        groups[key].append(image)
+    return [sorted(group, key=lambda i: i.name) for group in groups.values() if len(group) > 1]
+
+
+def _sort_images(images, skipped, candidates, by_size, folders, progress):
+    """First pass: packed images hashed, file images sorted by size."""
+    import hashlib
+    for index, image in enumerate(images):
+        progress.update(index)
         if image.library is not None or image.type in SKIPPED_IMAGE_TYPES:
             continue
         if image.source == 'GENERATED' or _has_unsaved_pixels(image):
@@ -318,25 +568,34 @@ def find_duplicate_images(skipped=None):
             candidates.append((('packed', hashlib.md5(data).hexdigest()) + settings, image))
             continue
         path = bpy.path.abspath(image.filepath_raw or image.filepath)
-        if not path or not os.path.isfile(path):
+        size = folders.size(path) if path else None
+        if size is None:
             continue
-        by_size[os.path.getsize(path)].append((path, settings, image))
-    for entries in by_size.values():
-        if len(entries) < 2:
-            continue   # a size nothing else shares: no need to hash it
-        hashes = {}
-        for path, settings, image in entries:
-            key = os.path.normcase(os.path.abspath(path))
-            if key not in hashes:
-                try:
-                    hashes[key] = _file_md5(path)
-                except OSError:
-                    continue
-            candidates.append((('file', hashes[key]) + settings, image))
-    groups = defaultdict(list)
-    for key, image in candidates:
-        groups[key].append(image)
-    return [sorted(group, key=lambda i: i.name) for group in groups.values() if len(group) > 1]
+        by_size[size].append((path, settings, image))
+
+
+def safe_image_groups(context=None):
+    """(groups to merge, skipped generated/unsaved images, {copy: why it stays})."""
+    skipped = []
+    groups = find_duplicate_images(skipped, context)
+    groups, blocked = _split_blocked(groups, pick_image_to_keep, PLAIN_IMAGE_USERS)
+    return groups, skipped, blocked
+
+
+def _scanned_image_groups(context, consume=False):
+    """(groups, skipped, blocked) found by the dialog, or a fresh scan."""
+    found = recall_scan('images', bpy.data.images, consume)
+    if found is not None:
+        names, skipped_names, blocked = found
+        groups = [[bpy.data.images.get(n) for n in group] for group in names]
+        skipped = [bpy.data.images.get(n) for n in skipped_names]
+        if all(i is not None for group in groups for i in group) and all(skipped):
+            return groups, skipped, blocked
+    groups, skipped, blocked = safe_image_groups(context)
+    if not consume:
+        remember_scan('images', bpy.data.images,
+                      ([[i.name for i in g] for g in groups], [i.name for i in skipped], blocked))
+    return groups, skipped, blocked
 
 
 def pick_image_to_keep(group):
@@ -364,6 +623,12 @@ def _skipped_note(skipped):
     return f" ({len(skipped)} generated or unsaved image(s) skipped)"
 
 
+def _blocked_note(blocked):
+    if not blocked:
+        return ""
+    return f" ({len(blocked)} referenced copy(ies) kept, see Show Last Report)"
+
+
 def _format_bytes(value):
     return f"{value / (1024 ** 3):.2f} GB" if value >= 1024 ** 3 else f"{value / (1024 ** 2):.0f} MB"
 
@@ -375,16 +640,17 @@ class OBJECT_OT_merge_duplicate_images(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def invoke(self, context, event):
-        skipped = []
-        self._groups = find_duplicate_images(skipped)
-        if not self._groups:
-            self.report({'INFO'}, "No duplicate images found" + _skipped_note(skipped))
+        _SCANS.pop('images', None)
+        groups, skipped, blocked = _scanned_image_groups(context)
+        if not groups:
+            self.report({'INFO'}, "No duplicate images found" + _skipped_note(skipped)
+                        + _blocked_note(blocked))
             return {'CANCELLED'}
         return context.window_manager.invoke_props_dialog(self, width=460)
 
-    def draw(self, _context):
+    def draw(self, context):
         layout = self.layout
-        groups = getattr(self, '_groups', None) or find_duplicate_images()
+        groups, skipped, blocked = _scanned_image_groups(context)
         removed = sum(len(group) - 1 for group in groups)
         saved = sum(_group_bytes(group) for group in groups)
         layout.label(text=f"{removed} image(s) will be merged into {len(groups)}", icon='INFO')
@@ -396,17 +662,23 @@ class OBJECT_OT_merge_duplicate_images(bpy.types.Operator):
             box.label(text=f"  {pick_image_to_keep(group).name}: {len(group) - 1} copies")
         if len(groups) > 6:
             box.label(text=f"  ... and {len(groups) - 6} more")
-        skipped = []
-        find_duplicate_images(skipped)
+        if blocked:
+            layout.label(text=f"{len(blocked)} copy(ies) kept: referenced by a custom property "
+                              "or a driver", icon='LOCKED')
         if skipped:
             layout.label(text=f"{len(skipped)} image(s) left alone (generated or unsaved painting)")
         layout.label(text="Applies to the whole file. The copies are deleted.")
 
     def execute(self, context):
-        skipped = []
-        groups = find_duplicate_images(skipped)
+        from .report import set_report
+        groups, skipped, blocked = _scanned_image_groups(context, consume=True)
+        if blocked:
+            set_report(context, "Merge Duplicate Images",
+                       [('WARNING', f"Kept {name}: {reason}")
+                        for name, reason in sorted(blocked.items())])
         if not groups:
-            self.report({'INFO'}, "No duplicate images found" + _skipped_note(skipped))
+            self.report({'INFO'}, "No duplicate images found" + _skipped_note(skipped)
+                        + _blocked_note(blocked))
             return {'CANCELLED'}
         saved = sum(_group_bytes(group) for group in groups)
         restore_viewports = viewports_to_solid(context)
@@ -431,7 +703,7 @@ class OBJECT_OT_merge_duplicate_images(bpy.types.Operator):
         message = f"{merged} duplicate image(s) merged into {len(groups)}"
         if saved:
             message += f", about {_format_bytes(saved)} freed"
-        message += _skipped_note(skipped)
+        message += _skipped_note(skipped) + _blocked_note(blocked)
         self.report({'INFO'}, message)
         return {'FINISHED'}
 

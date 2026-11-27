@@ -13,7 +13,7 @@ Bug reports, feature requests and pull requests are welcome, see
 
 ## Requirements
 
-- Blender 5.0 or later (tested on 5.2).
+- Blender 5.0 or later (tested on 5.2 and 5.3).
 - Unreal Engine 5.5 or later (tested on 5.8), running on the same computer,
   with the **Python Editor Script Plugin** (remote execution on) and the
   **USD Importer** plugin. The **Connection Doctor** can enable both for you.
@@ -188,18 +188,29 @@ Mesh
 - Naming: **Normalize Names (Quick)** (Unreal prefixes and PascalCase),
   **Normalize (Advanced)**, **Find & Replace**, **Clean Suffixes**, **Mesh
   Name from Object**, **Object Name from Mesh**, **Material Name from
-  Mesh**, **Add Prefix**.
+  Mesh**, **Add Prefix**. Normalize leaves rigs alone by default (armatures,
+  their widgets and constraint targets): rigs find them by name. Untick
+  **Skip Rigs** to rename them too.
+- **Rename Cameras**: names cameras `Cam_<NN>_<Shot>_V<n>[A|B|C]_<lens>mm`
+  (`Cam_01_Large_V3B_50mm`). One row per camera with a preview of the new
+  name; the focal length is read from the camera (an animated one is
+  flagged). Object and camera data are renamed together; timeline markers
+  and sequencer strips stay bound.
 - Materials: **Auto Setup PBR Textures**, **Create Material by Mesh**,
   **Convert to Simple PBR**, **Detect Unsupported Nodes**, **Bake
   Procedural to Texture**, **Validate Texture Paths**, **Rename Textures for
   Unreal**, **Extract Textures**, **Delete Unused Materials** (empty slots of
   the selection), **Purge Unused Materials** (whole file), **Merge Duplicate
   Materials** and **Merge Duplicate Images** (by content, whatever the
-  names).
+  names). Materials with drivers or keys are left out unless **Include
+  Animated/Driven Materials** is ticked, and a copy that a custom property
+  or a driver points at is kept: the report says which and why.
 - Scene Cleanup: **Scene Weight Report** (what weighs at render time:
-  triangles, shared meshes, textures, heavy subdivisions), **Delete Hidden
-  Objects**, **Delete Unused Empties** (camera rigs and constraint targets
-  kept), **Remove Empty Parents**, **Remove Empty Collections**, **Purge
+  triangles of objects and of instances, the unique geometry really kept in
+  memory, shared meshes, textures, heavy subdivisions), **Delete Hidden
+  Objects**, **Delete Unused Empties** (every empty a rig, a modifier, a
+  driver or an instance needs is kept; **Dry Run** lists what would go
+  without changing anything), **Remove Empty Parents**, **Remove Empty Collections**, **Purge
   Zero-Face Meshes**, **Clean Vertex Groups**, **Remove Unused Mesh Data**.
 - **Validate for Unreal**: lists what still needs attention.
 
@@ -282,9 +293,22 @@ Use **Fix Permanently (DefaultEngine.ini)** (Advanced) and restart Unreal.
 
 ## Changelog
 
-**Next**: Auto Align (Rotate, Bake, Keep), rotated copies recognized by
-Detect Duplicates and Split Repeated Parts, Static Mesh sockets from
-`SOCKET_` empties (Send to Unreal and FBX), Add Socket.
+**0.9.5**: new tools and safer cleanup on production scenes.
+- Auto Align (Rotate, Bake, Keep); rotated copies recognized by Detect
+  Duplicates and Split Repeated Parts.
+- Static Mesh sockets from `SOCKET_` empties (Send to Unreal and FBX), Add
+  Socket.
+- Rename Cameras (`Cam_01_Large_V3B_50mm`).
+- Scene Weight Report separates instanced triangles from the unique
+  geometry kept in memory.
+- Merge Duplicate Materials and Images no longer freeze on large files
+  (one scan per dialog, progress bar, network folders read once). Driven or
+  animated materials are left out by default, and copies referenced by a
+  custom property or a driver are kept.
+- Delete Unused Empties keeps every empty a rig, a modifier, a driver or an
+  instance needs, and has a Dry Run.
+- Normalize Names skips rigs by default.
+- Tested on Blender 5.3.
 
 **0.9.4**: review release, nothing new, everything safer.
 

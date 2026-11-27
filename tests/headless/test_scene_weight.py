@@ -219,7 +219,10 @@ t.check('weight_parent_hide_render_excludes', 'Tree' not in by_name and 'TreeIns
 t.check('weight_particles', by_name.get('Emitter') == 2 + 120, by_name.get('Emitter'))
 expected_displayed = 12 + 192 + 36 + 24 + 122
 t.check('weight_total', data['displayed'] == expected_displayed, data['displayed'])
-t.check('weight_unique_lower', data['unique'] == expected_displayed - 36, data['unique'])
+# unique: the cube mesh once (Plain + 3 parasols), Subdivided, the Prop
+# source once (2 collection instances + 10 particles), the emitter plane
+t.check('weight_unique_lower', data['unique'] == 12 + 192 + 12 + 2, data['unique'])
+t.check('weight_instanced', data['instanced'] == 24 + 120, data['instanced'])
 t.check('weight_shared_flagged', any(len(members) == 4 for _d, members in data['shared']))
 t.check('weight_sorted', data['rows'][0]['name'] == 'Subdivided')
 

@@ -260,7 +260,7 @@ def resolve_bsdf_input(socket, depth=0):
 
 
 def get_principled(material):
-    if not material or not material.use_nodes or material.node_tree is None:
+    if not material or material.node_tree is None:
         return None
     output = material.node_tree.get_output_node('ALL')
     socket = output.inputs.get('Surface') if output else None
